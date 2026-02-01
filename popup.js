@@ -208,6 +208,115 @@ function updateSelectionCount(count) {
   }
 }
 
+// ===== Live Preview =====
+const previewPanel = document.getElementById('preview-panel');
+const previewTag = document.getElementById('preview-tag');
+const previewDims = document.getElementById('preview-dims');
+const previewCode = document.getElementById('preview-code');
+const previewRender = document.getElementById('preview-render');
+
+let lastPreviewSnippet = '';
+let lastPreviewRectKey = '';
+
+function updateLivePreview(response) {
+  if (!response || !response.previewSnippet) {
+    previewPanel.classList.remove('visible');
+    lastPreviewSnippet = '';
+    lastPreviewRectKey = '';
+    previewRender.innerHTML = '';
+    return;
+  }
+
+  // Show panel
+  previewPanel.classList.add('visible');
+
+  // Update header
+  let tagLabel = `<${response.previewTag || 'element'}>`;
+  if (response.previewClasses) {
+    tagLabel += `.${response.previewClasses.split(/\s+/).slice(0, 2).join('.')}`;
+  }
+  previewTag.textContent = tagLabel;
+  previewDims.textContent = response.previewDimensions || '';
+
+  // Update visual render (screenshot cropped to element)
+  if (response.previewRect) {
+    const r = response.previewRect;
+    const rectKey = `${r.x},${r.y},${r.width},${r.height}`;
+    if (rectKey !== lastPreviewRectKey) {
+      lastPreviewRectKey = rectKey;
+      captureElementPreview(r);
+    }
+  } else {
+    previewRender.innerHTML = '';
+    lastPreviewRectKey = '';
+  }
+
+  // Update code preview (only if changed)
+  if (response.previewSnippet !== lastPreviewSnippet) {
+    lastPreviewSnippet = response.previewSnippet;
+    previewCode.innerHTML = highlightHtml(response.previewSnippet);
+  }
+}
+
+function captureElementPreview(rect) {
+  chrome.runtime.sendMessage({ type: 'CAPTURE_TAB' }, (result) => {
+    if (!result || !result.ok || !result.dataUrl) {
+      previewRender.innerHTML = '';
+      return;
+    }
+
+    const img = new Image();
+    img.onload = () => {
+      // Crop the screenshot to the element's bounding rect
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+
+      // Clamp to image bounds
+      const sx = Math.max(0, rect.x);
+      const sy = Math.max(0, rect.y);
+      const sw = Math.min(rect.width, img.width - sx);
+      const sh = Math.min(rect.height, img.height - sy);
+
+      if (sw <= 0 || sh <= 0) {
+        previewRender.innerHTML = '';
+        return;
+      }
+
+      canvas.width = sw;
+      canvas.height = sh;
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+
+      const croppedImg = document.createElement('img');
+      croppedImg.src = canvas.toDataURL('image/png');
+      croppedImg.alt = 'Element preview';
+      previewRender.innerHTML = '';
+      previewRender.appendChild(croppedImg);
+    };
+    img.src = result.dataUrl;
+  });
+}
+
+function highlightHtml(html) {
+  // Escape HTML entities first
+  let escaped = html
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Highlight tags
+  escaped = escaped.replace(/&lt;(\/?)([\w-]+)/g, '&lt;$1<span class="hl-tag">$2</span>');
+
+  // Highlight attributes
+  escaped = escaped.replace(/([\w-]+)=&quot;/g, '<span class="hl-attr">$1</span>=&quot;');
+  escaped = escaped.replace(/([\w-]+)="/g, '<span class="hl-attr">$1</span>="');
+
+  // Highlight attribute values
+  escaped = escaped.replace(/="([^"]*?)"/g, '="<span class="hl-val">$1</span>"');
+  escaped = escaped.replace(/=&quot;([^&]*?)&quot;/g, '=&quot;<span class="hl-val">$1</span>&quot;');
+
+  return escaped;
+}
+
 // ===== Initialize =====
 setupModifierButtons();
 
@@ -521,6 +630,8 @@ function startStatePolling() {
             xrayMode = response.xrayMode || false;
             updateXrayButton();
           }
+          // Update live preview
+          updateLivePreview(response);
         }
       });
     });
@@ -537,6 +648,7 @@ clearBtn.addEventListener("click", () => {
       if (response) {
         setStatus('Selection cleared', 'idle');
         updateSelectionCount(0);
+        updateLivePreview(null); // Clear preview
       }
     });
   });
@@ -618,7 +730,7 @@ function hideExportModal() {
 
 function updateFilenamePreview() {
   const name = sanitizeFilename(filenameInput.value) || 'component';
-  filenamePreview.textContent = `${name}.html, ${name}.toon`;
+  filenamePreview.textContent = `${name}.html, ${name}.jsx, ${name}.css, ${name}.toon`;
 }
 
 function sanitizeFilename(name) {
@@ -629,7 +741,7 @@ function sanitizeFilename(name) {
 function performExport(filename) {
   if (!pendingExportData) return;
 
-  const { toon, html } = pendingExportData;
+  const { toon, html, jsx, css } = pendingExportData;
   const safeName = sanitizeFilename(filename) || 'component';
 
   // Download TOON
@@ -651,6 +763,32 @@ function performExport(filename) {
     htmlLink.click();
     URL.revokeObjectURL(htmlUrl);
   }, 100);
+
+  // Download JSX
+  if (jsx) {
+    setTimeout(() => {
+      const jsxBlob = new Blob([jsx], { type: "text/javascript" });
+      const jsxUrl = URL.createObjectURL(jsxBlob);
+      const jsxLink = document.createElement("a");
+      jsxLink.href = jsxUrl;
+      jsxLink.download = `${safeName}.jsx`;
+      jsxLink.click();
+      URL.revokeObjectURL(jsxUrl);
+    }, 200);
+  }
+
+  // Download CSS (companion to JSX)
+  if (css) {
+    setTimeout(() => {
+      const cssBlob = new Blob([css], { type: "text/css" });
+      const cssUrl = URL.createObjectURL(cssBlob);
+      const cssLink = document.createElement("a");
+      cssLink.href = cssUrl;
+      cssLink.download = `${safeName}.css`;
+      cssLink.click();
+      URL.revokeObjectURL(cssUrl);
+    }, 300);
+  }
 
   const count = currentSelectionCount || 1;
   setStatus(`Exported ${count} element${count > 1 ? 's' : ''} successfully!`, 'success');
@@ -690,7 +828,7 @@ exportModal.addEventListener('click', (e) => {
   }
 });
 
-// Export button - first check for selections, then show modal
+// Export button - extract and open preview page
 exportBtn.addEventListener("click", () => {
   getActiveTab((tab) => {
     setStatus('Preparing export...', 'active');
@@ -701,10 +839,11 @@ exportBtn.addEventListener("click", () => {
         return;
       }
 
-      // Store the export data and show the filename modal
-      pendingExportData = response;
-      setStatus('Ready to export', 'active');
-      showExportModal();
+      // Store export data and open preview page
+      chrome.storage.local.set({ pluckExportData: response }, () => {
+        chrome.tabs.create({ url: chrome.runtime.getURL('preview.html') });
+        setStatus('Opened preview', 'success');
+      });
     });
   });
 });

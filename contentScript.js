@@ -1620,13 +1620,32 @@ document.addEventListener("keydown", (e) => {
     // Otherwise let ESC do its normal Chrome job
   }
 
-  // Export selection - show filename prompt
+  // Export selection - open preview page
   if (matchesShortcut(e, shortcuts.export)) {
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
     if (selectedElements.size > 0) {
-      showFilenamePrompt();
+      showModeIndicator('Preparing export...');
+      buildExport().then(result => {
+        if (result && result.toon) {
+          chrome.storage.local.set({ pluckExportData: result }, () => {
+            chrome.runtime.sendMessage({ type: 'OPEN_PREVIEW_TAB' }, (response) => {
+              if (chrome.runtime.lastError) {
+                // Fallback: open directly if background didn't respond
+                console.warn('[Pluck] Background message failed, opening directly:', chrome.runtime.lastError.message);
+                window.open(chrome.runtime.getURL('preview.html'), '_blank');
+              }
+              showModeIndicator('Export ready');
+            });
+          });
+        } else {
+          showModeIndicator('Export failed');
+        }
+      }).catch(err => {
+        console.error('[Pluck] Export error:', err);
+        showModeIndicator('Export failed');
+      });
     } else {
       showModeIndicator('No elements selected');
     }
@@ -2350,6 +2369,21 @@ function getHoverStyles(el, normalStyles) {
 
 // --- Get non-default styles as compact object ---
 // Returns { shared: {}, inline: {} } where shared goes to CSS class, inline to style attribute
+// Tailwind CSS detection (cached per page)
+let _tailwindDetected = null;
+function isTailwindPage() {
+  if (_tailwindDetected !== null) return _tailwindDetected;
+  const rootStyles = getComputedStyle(document.documentElement);
+  for (let i = 0; i < rootStyles.length; i++) {
+    if (rootStyles[i].startsWith('--tw-')) {
+      _tailwindDetected = true;
+      return true;
+    }
+  }
+  _tailwindDetected = false;
+  return false;
+}
+
 function getCompactStyles(el, isRoot = false) {
   const hadHover = el.classList.contains("web-replica-hover");
   const hadSelected = el.classList.contains("web-replica-selected");
@@ -2403,6 +2437,16 @@ function getCompactStyles(el, isRoot = false) {
         value = webkitValue;
         console.log('[Pluck Debug] Using -webkit-backdrop-filter fallback:', value);
       }
+    }
+
+    // Tailwind CSS: filter out unresolved --tw-* variable references
+    // getComputedStyle resolves most variables, but some internal Tailwind utility
+    // variables (ring, shadow, transform) can produce odd intermediate values
+    if (isTailwindPage() && typeof value === 'string') {
+      // Skip properties that are purely Tailwind internal variables
+      if (prop.startsWith('--tw-')) continue;
+      // If the resolved value still contains var(--tw-*), it's unresolvable
+      if (value.includes('var(--tw-')) continue;
     }
 
     if (isDefaultValue(prop, value)) continue;
@@ -3026,6 +3070,219 @@ function structureToHtml(node, indent = 0) {
   return html;
 }
 
+// --- JSX Helpers ---
+
+// Map HTML attributes to JSX equivalents
+const HTML_TO_JSX_ATTRS = {
+  'class': 'className',
+  'for': 'htmlFor',
+  'tabindex': 'tabIndex',
+  'readonly': 'readOnly',
+  'maxlength': 'maxLength',
+  'cellpadding': 'cellPadding',
+  'cellspacing': 'cellSpacing',
+  'colspan': 'colSpan',
+  'rowspan': 'rowSpan',
+  'enctype': 'encType',
+  'contenteditable': 'contentEditable',
+  'crossorigin': 'crossOrigin',
+  'accesskey': 'accessKey',
+  'autocomplete': 'autoComplete',
+  'autofocus': 'autoFocus',
+  'autoplay': 'autoPlay',
+};
+
+// Convert CSS property name to camelCase for JSX style objects
+function cssPropToCamel(prop) {
+  // Handle vendor prefixes
+  if (prop.startsWith('-webkit-')) prop = prop.replace('-webkit-', 'Webkit');
+  else if (prop.startsWith('-moz-')) prop = prop.replace('-moz-', 'Moz');
+  else if (prop.startsWith('-ms-')) prop = prop.replace('-ms-', 'ms');
+  return prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+// Convert CSS string to JSX style object string
+// "color: red; font-size: 14px" → '{ color: "red", fontSize: "14px" }'
+function cssStringToJsxStyleObj(cssString) {
+  if (!cssString) return null;
+  const parts = cssString.split(';').filter(s => s.trim());
+  if (parts.length === 0) return null;
+  const entries = parts.map(decl => {
+    const colonIdx = decl.indexOf(':');
+    if (colonIdx === -1) return null;
+    const prop = decl.substring(0, colonIdx).trim();
+    const val = decl.substring(colonIdx + 1).trim();
+    const camelProp = cssPropToCamel(prop);
+    // Numbers without units stay as numbers, everything else is a string
+    const numericVal = parseFloat(val);
+    if (!isNaN(numericVal) && String(numericVal) === val) {
+      return `${camelProp}: ${val}`;
+    }
+    return `${camelProp}: "${val}"`;
+  }).filter(Boolean);
+  return `{ ${entries.join(', ')} }`;
+}
+
+// Escape text for JSX (curly braces need escaping)
+function escapeJsx(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\{/g, '&#123;')
+    .replace(/\}/g, '&#125;');
+}
+
+// --- Build JSX from structure ---
+function structureToJsx(node, indent = 0) {
+  const pad = '  '.repeat(indent);
+  const tag = node.tag;
+
+  // SVG - output preserved outerHTML directly (JSX-compatible SVGs)
+  if (node.svg) {
+    // Convert SVG attributes to JSX-compatible ones
+    let svgStr = node.svg;
+    svgStr = svgStr.replace(/class="/g, 'className="');
+    svgStr = svgStr.replace(/clip-path="/g, 'clipPath="');
+    svgStr = svgStr.replace(/fill-rule="/g, 'fillRule="');
+    svgStr = svgStr.replace(/clip-rule="/g, 'clipRule="');
+    svgStr = svgStr.replace(/stroke-width="/g, 'strokeWidth="');
+    svgStr = svgStr.replace(/stroke-linecap="/g, 'strokeLinecap="');
+    svgStr = svgStr.replace(/stroke-linejoin="/g, 'strokeLinejoin="');
+    svgStr = svgStr.replace(/fill-opacity="/g, 'fillOpacity="');
+    svgStr = svgStr.replace(/stroke-opacity="/g, 'strokeOpacity="');
+    svgStr = svgStr.replace(/stroke-dasharray="/g, 'strokeDasharray="');
+    svgStr = svgStr.replace(/stroke-dashoffset="/g, 'strokeDashoffset="');
+    svgStr = svgStr.replace(/font-size="/g, 'fontSize="');
+    svgStr = svgStr.replace(/font-family="/g, 'fontFamily="');
+    svgStr = svgStr.replace(/text-anchor="/g, 'textAnchor="');
+    svgStr = svgStr.replace(/xmlns:xlink="/g, 'xmlnsXlink="');
+    return `${pad}${svgStr}`;
+  }
+
+  // Build JSX attributes
+  let attrs = '';
+  let classes = [];
+  if (node.style) classes.push(node.style);
+
+  // Icon font class
+  if (node.isIcon && node.iconFont) {
+    if (node.iconFont.includes('symbol')) {
+      classes.push('material-symbols-outlined');
+    } else if (node.iconFont.includes('material') || node.iconFont.includes('google')) {
+      classes.push('material-icons');
+    }
+  }
+
+  if (classes.length > 0) {
+    attrs += ` className="${classes.join(' ')}"`;
+  }
+
+  // Build inline style as JSX object
+  let inlineStyleParts = [];
+  if (node.inlineStyle) inlineStyleParts.push(node.inlineStyle);
+  if (node.pseudoBg) inlineStyleParts.push(`background-color: ${node.pseudoBg}`);
+  if (node.pseudoRadius) inlineStyleParts.push(`border-radius: ${node.pseudoRadius}`);
+
+  if (inlineStyleParts.length > 0) {
+    const styleObj = cssStringToJsxStyleObj(inlineStyleParts.join('; '));
+    if (styleObj) {
+      attrs += ` style={${styleObj}}`;
+    }
+  }
+
+  // Self-closing tags
+  const voidElements = ['img', 'input', 'br', 'hr', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr'];
+  if (voidElements.includes(tag)) {
+    if (node.src) attrs += ` src="${node.src}"`;
+    if (node.alt) attrs += ` alt="${escapeHtml(node.alt)}"`;
+    if (node.type) attrs += ` type="${node.type}"`;
+    const placeholder = node.placeholder || node.ariaLabel;
+    if (placeholder) attrs += ` placeholder="${escapeHtml(placeholder)}"`;
+    if (node.value) attrs += ` value="${escapeHtml(node.value)}"`;
+    // Fix input width for JSX
+    if (tag === 'input') {
+      const hasSmallWidth = node.inlineStyle && (node.inlineStyle.includes('width: 1px') || node.inlineStyle.includes('width: 0'));
+      if (hasSmallWidth || !node.inlineStyle) {
+        attrs = attrs.replace(/style=\{[^}]*\}/, '');
+        attrs += ` style={{ width: "100%", minWidth: 0, flexGrow: 1 }}`;
+      }
+    }
+    return `${pad}<${tag}${attrs} />`;
+  }
+
+  // Textarea
+  if (tag === 'textarea') {
+    const placeholder = node.placeholder || node.ariaLabel;
+    if (placeholder) attrs += ` placeholder="${escapeHtml(placeholder)}"`;
+    const content = node.value || node.text || '';
+    return `${pad}<${tag}${attrs}>{${JSON.stringify(content)}}</${tag}>`;
+  }
+
+  if (node.href) attrs += ` href="${node.href}"`;
+  if (node.ariaLabel) attrs += ` aria-label="${node.ariaLabel}"`;
+
+  // No children, just text
+  if (!node.children && node.text) {
+    let stylesParts = [];
+    if (node.inlineStyle) stylesParts.push(node.inlineStyle);
+    if (node.pseudoBg) stylesParts.push(`background-color: ${node.pseudoBg}`);
+    if (node.pseudoRadius) stylesParts.push(`border-radius: ${node.pseudoRadius}`);
+    if (node.pseudoColor) stylesParts.push(`color: ${node.pseudoColor}`);
+    if (node.pseudoWidth) stylesParts.push(`width: ${node.pseudoWidth}`);
+    if (node.pseudoHeight) stylesParts.push(`height: ${node.pseudoHeight}`);
+    if (node.fromPseudo && node.pseudoBg) {
+      stylesParts.push('display: flex');
+      stylesParts.push('align-items: center');
+      stylesParts.push('justify-content: center');
+    }
+    const finalStyle = stylesParts.join('; ');
+
+    // Rebuild attrs for text elements
+    attrs = '';
+    let textClasses = [];
+    if (node.style) textClasses.push(node.style);
+    if (node.isIcon && node.iconFont) {
+      if (node.iconFont.includes('symbol')) textClasses.push('material-symbols-outlined');
+      else textClasses.push('material-icons');
+    }
+    if (textClasses.length > 0) attrs += ` className="${textClasses.join(' ')}"`;
+    if (finalStyle) {
+      const styleObj = cssStringToJsxStyleObj(finalStyle);
+      if (styleObj) attrs += ` style={${styleObj}}`;
+    }
+    if (node.href) attrs += ` href="${node.href}"`;
+    if (node.ariaLabel) attrs += ` aria-label="${node.ariaLabel}"`;
+    return `${pad}<${tag}${attrs}>${escapeJsx(node.text)}</${tag}>`;
+  }
+
+  // Has children - use orderedContent
+  let jsx = `${pad}<${tag}${attrs}>`;
+
+  if (node.orderedContent && node.orderedContent.length > 0) {
+    jsx += '\n';
+    for (const item of node.orderedContent) {
+      if (item.type === 'text') {
+        jsx += `${pad}  ${escapeJsx(item.content)}\n`;
+      } else if (item.type === 'element') {
+        jsx += structureToJsx(item.node, indent + 1) + '\n';
+      }
+    }
+    jsx += pad;
+  } else if (node.text) {
+    jsx += escapeJsx(node.text);
+  } else if (node.children) {
+    jsx += '\n';
+    for (const child of node.children) {
+      jsx += structureToJsx(child, indent + 1) + '\n';
+    }
+    jsx += pad;
+  }
+
+  jsx += `</${tag}>`;
+  return jsx;
+}
+
 // Global map to link clones back to originals (for style computation)
 let cloneToOriginal = new Map();
 
@@ -3341,11 +3598,39 @@ ${bodyHtml}
 </body>
 </html>`;
 
+  // Build JSX output
+  const jsxBody = Array.isArray(structure)
+    ? structure.map(s => structureToJsx(s, 3)).join('\n\n')
+    : structureToJsx(structure, 3);
+
+  const jsxComponent = `import React from 'react';
+import './Component.css';
+
+const Component = () => {
+  return (
+    <>
+${jsxBody}
+    </>
+  );
+};
+
+export default Component;`;
+
+  // Build CSS module content (same styles, for use alongside JSX)
+  const cssModule = css;
+
+  // Beautify output if available
+  const finalHtml = typeof beautifyHtml === 'function' ? beautifyHtml(html) : html;
+  const finalJsx = typeof beautifyJsx === 'function' ? beautifyJsx(jsxComponent) : jsxComponent;
+
   return {
     toon,  // TOON format for LLMs (more token-efficient)
-    html
+    html: finalHtml,
+    jsx: finalJsx,
+    css: cssModule
   };
 }
+
 
 // --- Helper to broadcast message to all iframes ---
 function broadcastToFrames(msg) {
@@ -3465,7 +3750,56 @@ try {
   }
 
   if (msg.type === "GET_STATE") {
-    sendResponse({ pickMode, xrayMode, selectionCount: selectedElements.size });
+    // Build a quick snippet of selected/hovered element for live preview
+    let previewSnippet = '';
+    let previewTag = '';
+    let previewClasses = '';
+    let previewDimensions = '';
+
+    // Show last selected element, or hovered element if nothing selected
+    const previewEl = selectedElements.size > 0
+      ? Array.from(selectedElements).pop()
+      : (pickMode ? hoverElement : null);
+
+    if (previewEl) {
+      previewTag = previewEl.tagName.toLowerCase();
+      previewClasses = previewEl.className
+        ? previewEl.className.toString().replace(/web-replica-\w+/g, '').trim()
+        : '';
+      const rect = previewEl.getBoundingClientRect();
+      previewDimensions = `${Math.round(rect.width)} × ${Math.round(rect.height)}`;
+
+      // Get a truncated outerHTML for preview (limit to 2000 chars)
+      try {
+        let html = previewEl.outerHTML;
+        if (html.length > 2000) {
+          html = html.substring(0, 2000) + '\n<!-- ... truncated -->';
+        }
+        previewSnippet = html;
+      } catch (e) {
+        previewSnippet = `<${previewTag}>...</${previewTag}>`;
+      }
+    }
+
+    sendResponse({
+      pickMode,
+      xrayMode,
+      selectionCount: selectedElements.size,
+      previewSnippet,
+      previewTag,
+      previewClasses,
+      previewDimensions,
+      previewRect: previewEl ? (() => {
+        const r = previewEl.getBoundingClientRect();
+        return {
+          x: Math.round(r.x * window.devicePixelRatio),
+          y: Math.round(r.y * window.devicePixelRatio),
+          width: Math.round(r.width * window.devicePixelRatio),
+          height: Math.round(r.height * window.devicePixelRatio),
+          dpr: window.devicePixelRatio
+        };
+      })() : null
+    });
     return true;
   }
 

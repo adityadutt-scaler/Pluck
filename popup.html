@@ -361,6 +361,108 @@
       border-top: 1px solid var(--border-color);
     }
 
+    /* ===== Live Preview Panel ===== */
+    .preview-panel {
+      display: none;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      margin-bottom: var(--spacing-md);
+      overflow: hidden;
+    }
+
+    .preview-panel.visible {
+      display: block;
+    }
+
+    .preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: var(--spacing-xs) var(--spacing-sm);
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .preview-tag {
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      color: var(--accent-solid);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 200px;
+    }
+
+    .preview-dims {
+      font-size: 10px;
+      color: var(--text-tertiary);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+
+    .preview-render {
+      background: #fff;
+      border-bottom: 1px solid var(--border-color);
+      max-height: 160px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--spacing-sm);
+    }
+
+    .preview-render img {
+      max-width: 100%;
+      max-height: 150px;
+      object-fit: contain;
+      border-radius: 4px;
+    }
+
+    .preview-render:empty {
+      display: none;
+    }
+
+    .preview-code-wrapper {
+      max-height: 120px;
+      overflow-y: auto;
+    }
+
+    .preview-code-wrapper::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .preview-code-wrapper::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .preview-code-wrapper::-webkit-scrollbar-thumb {
+      background: var(--border-color);
+      border-radius: 2px;
+    }
+
+    .preview-code {
+      margin: 0;
+      padding: var(--spacing-sm);
+      background: #1e1e2e;
+      font-size: 10px;
+      line-height: 1.5;
+      tab-size: 2;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .preview-code code {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      color: #cdd6f4;
+    }
+
+    /* Simple syntax highlighting for preview (no Prism in popup) */
+    .preview-code .hl-tag { color: #f38ba8; }
+    .preview-code .hl-attr { color: #fab387; }
+    .preview-code .hl-val { color: #a6e3a1; }
+    .preview-code .hl-text { color: #cdd6f4; }
+
     /* ===== Shortcuts Display ===== */
     .shortcuts-display {
       display: flex;
@@ -756,7 +858,7 @@
       <button class="btn btn-icon" id="color-pick" title="Color Picker (Ctrl+Shift+P)">
         <span class="material-symbols-outlined">colorize</span>
       </button>
-      <button class="btn btn-icon" id="clear" title="Clear Selection">
+<button class="btn btn-icon" id="clear" title="Clear Selection">
         <span class="material-symbols-outlined">delete_sweep</span>
       </button>
       <button class="btn btn-secondary btn-export" id="export">
@@ -775,6 +877,20 @@
     <div class="selection-count" id="selection-count"></div>
     <div class="status-hint" id="hint">
       Hover to preview, click to select, Shift+Click for multi-select
+    </div>
+  </div>
+
+  <!-- Live Preview Panel -->
+  <div class="preview-panel" id="preview-panel">
+    <div class="preview-header">
+      <div class="preview-tag" id="preview-tag"></div>
+      <div class="preview-dims" id="preview-dims"></div>
+    </div>
+    <!-- Visual render preview -->
+    <div class="preview-render" id="preview-render"></div>
+    <!-- Code preview -->
+    <div class="preview-code-wrapper">
+      <pre class="preview-code"><code id="preview-code"></code></pre>
     </div>
   </div>
 
@@ -876,7 +992,7 @@
       <p>Enter a name for your exported files</p>
       <input type="text" class="filename-input" id="filename-input" placeholder="component" value="component">
       <div class="filename-preview" id="filename-preview">
-        component.html, component.toon
+        component.html, component.jsx, component.css, component.toon
       </div>
       <div class="modal-actions">
         <button class="btn-modal-cancel" id="modal-cancel">Cancel</button>

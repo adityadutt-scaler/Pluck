@@ -2,7 +2,7 @@
 
 **Extract any UI component from the web and make it yours.**
 
-Pluck is a Chrome browser extension that lets you select any UI component from any webpage, extract it with all its styles, and export it as standalone HTML or in a token-optimized format perfect for AI/LLM consumption.
+Pluck is a Chrome browser extension that lets you select any UI component from any webpage, extract it with all its styles, and export it as standalone HTML, JSX, CSS, or in a token-optimized format perfect for AI/LLM consumption. Includes a full-featured code preview page with live editing, syntax highlighting, and a dynamic live preview.
 
 ## Features
 
@@ -10,8 +10,19 @@ Pluck is a Chrome browser extension that lets you select any UI component from a
 - **Multi-Select Support** - Hold Shift and click to select multiple components, with live count display
 - **Combined Export** - Multiple selections are exported as a single file
 - **Standalone HTML Export** - Get a fully functional HTML file with embedded CSS
+- **JSX Export** - Convert extracted components to JSX with `className` attributes
+- **CSS Export** - Extracted and deduplicated CSS styles
 - **TOON Format Export** - Token-Optimized Object Notation for AI/LLM workflows
-- **Style Preservation** - Captures computed styles, fonts, pseudo-elements, and more
+- **Code Preview Page** - Dedicated preview page with syntax highlighting, live code editing, and dynamic live preview
+- **Live Code Editor** - Edit extracted code in-browser with real-time syntax highlighting (Prism-Live)
+- **Dynamic Live Preview** - Live HTML render that auto-adjusts orientation based on content aspect ratio
+- **Tailwind CSS Detection** - Automatically detects and flags Tailwind utility classes in extracted components
+- **HTML Beautification** - Exported HTML is auto-formatted with proper indentation
+- **Live Element Preview in Popup** - Real-time visual preview and code snippet of hovered/selected elements right in the extension popup
+- **Hover State Extraction** - Captures `:hover` CSS pseudo-class styles along with base styles
+- **Dynamic Content Freezing** - Clones elements at selection time so dynamic/animated content is captured exactly as seen
+- **Custom Font Embedding** - Fetches and embeds WOFF/WOFF2 fonts as base64 data URLs for fully offline exports
+- **Style Preservation** - Captures computed styles, Google Fonts, pseudo-elements, icon fonts, and more
 - **Shadow DOM Support** - Works with modern web components
 - **Customizable Shortcuts** - Configure keyboard shortcuts to your preference
 - **X-Ray Mode** - Inspect any element with detailed info, DOM path, dimensions, and box model visualization
@@ -65,21 +76,79 @@ Pluck is a Chrome browser extension that lets you select any UI component from a
    - Click the "Export" button in the popup, or
    - Use the keyboard shortcut (Ctrl+Shift+E / Cmd+Shift+E)
 
-7. **Two files are downloaded:**
-   - `component.html` - Standalone HTML with embedded styles
-   - `component.toon` - Token-optimized format for AI tools
+7. **Code Preview Page** opens with:
+   - Syntax-highlighted HTML, JSX, CSS, and TOON tabs
+   - Live preview of the rendered component
+   - Edit, copy, and download actions
+
+---
+
+## Code Preview Page
+
+When you export a component, Pluck opens a dedicated **Code Preview Page** with a full-featured code viewer and editor.
+
+### Tabs
+
+| Tab | Description |
+|-----|-------------|
+| **HTML** | Beautified, standalone HTML with embedded CSS classes |
+| **JSX** | React-ready JSX with `className` instead of `class` and self-closing tags |
+| **CSS** | Extracted and deduplicated CSS styles |
+| **TOON** | Token-optimized format for AI/LLM consumption |
+
+### Actions
+
+| Action | Shortcut | Description |
+|--------|----------|-------------|
+| **Edit** | `Ctrl/Cmd + E` | Toggle live code editing with syntax highlighting |
+| **Copy** | `Ctrl/Cmd + C` | Copy current tab content to clipboard |
+| **Download** | `Ctrl/Cmd + S` | Download the current tab as a file |
+| **Download All** | `Ctrl/Cmd + Shift + S` | Download all formats as separate files |
+| **Switch Tabs** | `1` / `2` / `3` / `4` | Quick-switch between HTML, JSX, CSS, TOON tabs |
+
+### Live Preview
+
+The preview page includes a **dynamic live preview** panel that renders the extracted HTML+CSS in real-time:
+
+- **Auto-orientation** - The preview panel automatically switches between a **right sidebar** (for tall/portrait content) and a **bottom strip** (for wide/landscape content) based on the rendered content's aspect ratio
+- **Real-time updates** - When editing code, the live preview updates with a 300ms debounce
+- **System theme aware** - The preview background adapts to light/dark system preference
+- **Toggle visibility** - Show/hide the preview panel with the eye icon in the header
+
+### Live Code Editor
+
+Click **Edit** to enter edit mode powered by [Prism-Live](https://live.prismjs.com/):
+
+- Full syntax highlighting while typing
+- Changes are reflected in the live preview in real-time
+- Edits persist within the session across tab switches
 
 ---
 
 ## Keyboard Shortcuts
 
+### Main Extension Shortcuts
+
 | Action | Mac | Windows / Linux | Notes |
 |--------|-----|-----------------|-------|
 | Toggle Selection | `Cmd + Shift + S` | `Ctrl + Shift + S` | Press again to stop |
 | Clear Selection | `Escape` | `Escape` | Clears all selected elements |
-| Export | `Cmd + Shift + E` | `Ctrl + Shift + E` | Downloads HTML + TOON files |
+| Export | `Cmd + Shift + E` | `Ctrl + Shift + E` | Opens Code Preview Page |
 | X-Ray Mode | `Cmd + Shift + X` | `Ctrl + Shift + X` | Toggle element inspector |
 | Color Picker | `Cmd + Shift + P` | `Ctrl + Shift + P` | Pick any color from screen |
+
+### Code Preview Page Shortcuts
+
+| Action | Mac | Windows / Linux |
+|--------|-----|-----------------|
+| Toggle Edit Mode | `Cmd + E` | `Ctrl + E` |
+| Copy Code | `Cmd + C` | `Ctrl + C` |
+| Download Current | `Cmd + S` | `Ctrl + S` |
+| Download All | `Cmd + Shift + S` | `Ctrl + Shift + S` |
+| Switch to HTML | `1` | `1` |
+| Switch to JSX | `2` | `2` |
+| Switch to CSS | `3` | `3` |
+| Switch to TOON | `4` | `4` |
 
 ### Customizing Shortcuts
 
@@ -99,18 +168,37 @@ The HTML export creates a **standalone, self-contained HTML file** that renders 
 
 **What's included:**
 - All computed CSS styles (deduplicated for efficiency)
+- **Hover states** (`:hover` pseudo-class styles) captured
 - Google Fonts automatically detected and loaded
 - **Custom WOFF/WOFF2 fonts embedded** as base64 data URLs for offline use
 - Images and SVGs preserved with original sources
 - Pseudo-elements (::before, ::after) captured
 - Icon fonts (Font Awesome, Material Icons, etc.) supported
 - Backdrop filters with cross-browser prefixes
+- **Beautified HTML** with proper indentation via js-beautify
+- Elements frozen at selection time to preserve dynamic content
 
-**Use cases:**
-- Quick prototyping and mockups
-- Sharing designs with team members
-- Archiving UI components for reference
-- Creating style guides
+### JSX Export
+
+The JSX export converts extracted HTML into **React-ready JSX**:
+
+- `class` → `className`
+- `for` → `htmlFor`
+- `tabindex` → `tabIndex`
+- Self-closing tags for void elements (`<img />`, `<br />`, etc.)
+- Inline `style` strings converted to JSX object syntax
+
+### CSS Export
+
+Standalone CSS output with:
+
+- Deduplicated style classes (s1, s2, s3, etc.)
+- Computed styles from the original page
+- Proper formatting and indentation
+
+### Tailwind CSS Detection
+
+When a component uses **Tailwind CSS** utility classes, Pluck automatically detects them and displays a badge in the popup. This helps you identify Tailwind-based components so you can use the appropriate approach when recreating them.
 
 ---
 
@@ -300,40 +388,64 @@ Pluck uses the Chrome Extension Manifest V3 architecture:
 │  (popup.js) │                   │ (contentScript.js)│
 └─────────────┘                   └────────┬─────────┘
                                            │
-                                           │ Download Request
+                                           │ Messages
                                            ▼
                                   ┌──────────────────┐
                                   │   Background     │
                                   │ (background.js)  │
+                                  └────────┬─────────┘
+                                           │
+                                           │ Opens
+                                           ▼
+                                  ┌──────────────────┐
+                                  │  Preview Page    │
+                                  │  (preview.html)  │
                                   └──────────────────┘
 ```
 
 **Popup** (`popup.html` + `popup.js`)
 - User interface for controlling the extension
 - Sends messages to content script to start/stop selection
-- Displays current status and settings
+- Displays current status, settings, and live element preview
 
 **Content Script** (`contentScript.js`)
 - Injected into every webpage
 - Handles element selection and highlighting
-- Extracts styles and builds export data
+- Extracts styles and builds export data (HTML, JSX, CSS, TOON)
+- Detects Tailwind CSS usage
 - Core extraction engine (~64KB)
 
 **Background Service Worker** (`background.js`)
 - Handles file downloads via Chrome Downloads API
-- Processes download requests from content script
-- Captures visible tab for Color Picker (screen capture)
+- Captures visible tab for Color Picker and live preview
+- Opens the Code Preview Page on export
+
+**Code Preview Page** (`preview.html` + `preview.js`)
+- Dedicated page for viewing and editing extracted code
+- Syntax highlighting via PrismJS
+- Live code editing via Prism-Live
+- Dynamic live preview with auto-orientation
+- Download individual or all export formats
 
 ### File Structure
 
 ```
 Pluck/
-├── manifest.json       # Extension configuration (Manifest V3)
-├── popup.html          # Popup UI markup
-├── popup.js            # Popup logic and event handlers
-├── background.js       # Service worker for downloads
-├── contentScript.js    # Core selection and extraction engine
-└── README.md           # This file
+├── manifest.json          # Extension configuration (Manifest V3)
+├── popup.html             # Popup UI markup
+├── popup.js               # Popup logic and event handlers
+├── background.js          # Service worker for downloads & preview
+├── contentScript.js       # Core selection and extraction engine
+├── preview.html           # Code Preview Page markup & styles
+├── preview.js             # Preview page logic, editor, live preview
+├── lib/
+│   ├── beautify-html.js   # HTML beautification library
+│   ├── bliss.js           # Bliss.js (DOM helper, Prism-Live dependency)
+│   ├── prism.js           # PrismJS syntax highlighter
+│   ├── prism.css          # PrismJS theme styles
+│   ├── prism-live.js      # Prism-Live editable code component
+│   └── prism-live.css     # Prism-Live editor styles
+└── README.md              # This file
 ```
 
 ### Key Technical Features
@@ -341,12 +453,21 @@ Pluck/
 | Feature | Description |
 |---------|-------------|
 | **Style Deduplication** | Generates reusable CSS classes (s1, s2, etc.) to minimize output size |
+| **Hover State Extraction** | Captures `:hover` pseudo-class styles and maps them to base selectors |
+| **Dynamic Content Freezing** | Clones elements at selection time to preserve exact DOM state |
 | **Shadow DOM Support** | Handles both open and closed shadow roots via composedPath() |
 | **iframe Support** | Works across nested iframes with cross-frame messaging |
 | **Pseudo-Element Extraction** | Captures ::before and ::after content and styles |
 | **Icon Font Detection** | Recognizes Material Icons, Font Awesome, and other icon fonts |
 | **Smart Sizing** | Uses different strategies for media elements vs text content |
 | **WOFF Font Embedding** | Extracts @font-face rules and embeds custom fonts as base64 for offline use |
+| **HTML Beautification** | Auto-formats HTML output with proper indentation via js-beautify |
+| **JSX Conversion** | Converts HTML attributes to JSX equivalents (class→className, etc.) |
+| **Tailwind Detection** | Identifies Tailwind CSS utility classes in extracted components |
+| **Popup Live Preview** | Real-time visual preview and code snippet of selected elements in the popup |
+| **Live Code Editor** | Prism-Live powered in-browser code editing with syntax highlighting |
+| **Dynamic Live Preview** | iframe-based HTML render that auto-switches between sidebar and bottom strip |
+| **Platform-Aware Shortcuts** | Auto-detects Mac vs Windows/Linux and uses appropriate modifier keys |
 | **X-Ray Inspector** | Real-time element inspection with box model visualization using Shadow DOM isolation |
 | **Color Picker** | Screen capture-based color sampling with magnified pixel view and clipboard copy |
 
@@ -356,8 +477,8 @@ Pluck/
 |------------|---------|
 | `activeTab` | Access the currently active tab when user clicks the extension |
 | `scripting` | Inject content scripts into web pages |
-| `storage` | Save user preferences and custom shortcuts (synced across devices) |
-| `downloads` | Download exported HTML and TOON files |
+| `storage` | Save user preferences, custom shortcuts, and export data for preview page |
+| `downloads` | Download exported HTML, JSX, CSS, and TOON files |
 | `webNavigation` | Detect frames and iframes for cross-frame support |
 
 ### Browser Compatibility

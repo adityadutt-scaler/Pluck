@@ -71,6 +71,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Handle opening preview tab (from content script keyboard shortcut)
+  // Captures tab screenshot, merges into stored data, then opens preview
+  if (message.type === 'OPEN_PREVIEW_TAB') {
+    const openPreview = () => {
+      chrome.tabs.create({ url: chrome.runtime.getURL('preview.html') });
+    };
+
+    // Try to capture screenshot before opening
+    try {
+      chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
+        if (chrome.runtime.lastError || !dataUrl) {
+          openPreview();
+          sendResponse({ ok: true });
+          return;
+        }
+        chrome.storage.local.get('pluckExportData', (result) => {
+          if (result.pluckExportData) {
+            result.pluckExportData.screenshotDataUrl = dataUrl;
+            chrome.storage.local.set({ pluckExportData: result.pluckExportData }, () => {
+              openPreview();
+              sendResponse({ ok: true });
+            });
+          } else {
+            openPreview();
+            sendResponse({ ok: true });
+          }
+        });
+      });
+    } catch (e) {
+      openPreview();
+      sendResponse({ ok: true });
+    }
+    return true; // Keep channel open for async
+  }
+
   // Handle screen capture for color picker
   if (message.type === 'CAPTURE_TAB') {
     chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
