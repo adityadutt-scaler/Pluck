@@ -337,16 +337,20 @@
 
     /* Bottom orientation */
     .main-content--bottom .preview-panel {
-      height: 200px;
-      min-height: 120px;
+      height: 40vh;
+      min-height: 200px;
+      max-height: 60vh;
       border-top: 1px solid var(--border-color);
+      resize: vertical;
     }
 
     /* Side (right sidebar) orientation */
     .main-content--side .preview-panel {
-      width: 320px;
-      min-width: 200px;
+      width: 36vw;
+      min-width: 240px;
+      max-width: 60vw;
       border-left: 1px solid var(--border-color);
+      resize: horizontal;
     }
 
     .preview-panel-header {
@@ -368,7 +372,7 @@
 
     .preview-panel-body {
       flex: 1;
-      overflow: hidden;
+      overflow: auto;
       position: relative;
       background: #ffffff;
     }
@@ -506,6 +510,65 @@
     .code-wrapper::-webkit-scrollbar-thumb:hover {
       background: rgba(255, 255, 255, 0.25);
     }
+
+    /* ── Diagnostics ── */
+    .diag-wrap { margin: 0 32px 12px; }
+    .diag {
+      background: #111113;
+      border: 1px solid #1f1f23;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .diag summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 10px 16px;
+      font-size: 12px;
+      color: #a1a1aa;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      user-select: none;
+    }
+    .diag summary::-webkit-details-marker { display: none; }
+    .diag summary::before {
+      content: '▸';
+      font-size: 10px;
+      color: #52525b;
+      transition: transform 0.15s;
+      display: inline-block;
+    }
+    .diag[open] summary::before { transform: rotate(90deg); }
+    .diag .diag-pill {
+      background: #18181b;
+      border: 1px solid #27272a;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      color: #a1a1aa;
+      font-family: SF Mono, Menlo, Consolas, monospace;
+    }
+    .diag .diag-pill.warn { color: #fbbf24; border-color: #422006; background: rgba(251, 191, 36, 0.06); }
+    .diag .diag-body {
+      padding: 4px 16px 14px;
+      font-family: SF Mono, Menlo, Consolas, monospace;
+      font-size: 11px;
+      color: #a1a1aa;
+      border-top: 1px solid #1f1f23;
+      margin-top: 6px;
+    }
+    .diag-row {
+      display: flex;
+      gap: 14px;
+      padding: 6px 0;
+      border-bottom: 1px solid #1a1a1d;
+      align-items: baseline;
+    }
+    .diag-row:last-child { border-bottom: none; }
+    .diag-row .tag { color: #a78bfa; min-width: 60px; }
+    .diag-row .meta { color: #52525b; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .diag-row .badge { background: #18181b; padding: 1px 6px; border-radius: 4px; color: #6366f1; font-size: 10px; }
+    .diag-row .badge.dropped { color: #ef4444; }
   </style>
 </head>
 <body>
@@ -565,11 +628,23 @@
       <button class="btn btn-secondary" id="btn-download-current" title="Download Current (Ctrl+S)">
         <span class="material-symbols-outlined">download</span>
       </button>
+      <button class="btn btn-secondary" id="btn-download-fonts" title="Download bundled fonts as a zip" hidden>
+        <span class="material-symbols-outlined">font_download</span>
+        Fonts
+      </button>
       <button class="btn btn-primary" id="btn-download-all" title="Download All (Ctrl+Shift+S)">
         <span class="material-symbols-outlined">folder_zip</span>
         Download All
       </button>
     </div>
+  </div>
+
+  <!-- Diagnostics -->
+  <div class="diag-wrap">
+    <details class="diag" id="diag" hidden>
+      <summary id="diag-summary"></summary>
+      <div class="diag-body" id="diag-body"></div>
+    </details>
   </div>
 
   <!-- Main Content: Code + Preview -->
@@ -588,9 +663,14 @@
     <div class="preview-panel hidden" id="preview-panel">
       <div class="preview-panel-header">
         <h3>Live Preview</h3>
-        <button class="btn-icon" id="btn-toggle-preview" title="Hide preview">
-          <span class="material-symbols-outlined">expand_more</span>
-        </button>
+        <div style="display: flex; gap: 4px;">
+          <button class="btn-icon" id="btn-flip-orientation" title="Flip orientation (side / bottom)">
+            <span class="material-symbols-outlined">splitscreen_right</span>
+          </button>
+          <button class="btn-icon" id="btn-toggle-preview" title="Hide preview">
+            <span class="material-symbols-outlined">expand_more</span>
+          </button>
+        </div>
       </div>
       <div class="preview-panel-body" id="preview-panel-body">
         <iframe id="preview-iframe" sandbox="allow-same-origin" title="Live preview"></iframe>

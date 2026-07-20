@@ -1,12 +1,25 @@
 {
   "manifest_version": 3,
   "name": "Pluck",
-  "version": "2.0.0",
+  "version": "3.1.0",
   "description": "Pluck UI components from any webpage and export them as standalone HTML with styles.",
-  "permissions": ["activeTab", "scripting", "webNavigation", "storage", "downloads"],
+  "permissions": ["activeTab", "scripting", "webNavigation", "storage", "downloads", "clipboardWrite", "sidePanel"],
   "host_permissions": ["<all_urls>"],
   "action": {
-    "default_popup": "popup.html"
+    "default_title": "Open Pluck dock"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "commands": {
+    "toggle-select": {
+      "suggested_key": { "default": "Ctrl+Shift+S", "mac": "Command+Shift+S" },
+      "description": "Pluck: start/stop selecting (opens the dock)"
+    },
+    "export-selection": {
+      "suggested_key": { "default": "Ctrl+Shift+E", "mac": "Command+Shift+E" },
+      "description": "Pluck: export selection (opens the dock)"
+    }
   },
   "background": {
     "service_worker": "background.js"

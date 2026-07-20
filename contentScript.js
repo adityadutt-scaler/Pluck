@@ -1,10 +1,21 @@
 // --- State ---
-let pickMode = false;
+let pickMode = false; applyPickCursor();
 let xrayMode = false;
 let hoverElement = null;
 let selectedElements = new Set();
 // Store clones at selection time to freeze dynamic content (like rotating ProTips)
 let selectionClones = new Map(); // original element -> clone (captured at selection time)
+
+// --- DOM navigation state ---
+let isNavigating = false;
+let navigatedElement = null;
+let navBackStack = [];
+
+// --- Export diagnostics ---
+let _exportDiag = null;
+
+// --- Tailwind mode (set in buildExport when source page uses Tailwind) ---
+let _tailwindStyles = null;
 
 // --- X-Ray Inspector State ---
 let inspectorOverlay = null;
@@ -20,13 +31,26 @@ console.log('[Pluck] Content script loaded in frame:', window.location.href.subs
 // --- Style Registry for deduplication ---
 let styleRegistry = new Map(); // styleString -> styleName (s1, s2, etc.)
 let hoverStyleRegistry = new Map(); // Maps base styleName -> hover styles object
+let pseudoStyleRegistry = new Map(); // key -> { className, bundle: { before?, after? } }
 let styleCounter = 0;
+let pseudoCounter = 0;
 
 function resetStyleRegistry() {
   styleRegistry.clear();
   hoverStyleRegistry.clear();
+  pseudoStyleRegistry.clear();
   styleCounter = 0;
+  pseudoCounter = 0;
   resetDetectedFonts();
+}
+
+function getOrCreatePseudoClass(bundle) {
+  const key = JSON.stringify(bundle);
+  const existing = pseudoStyleRegistry.get(key);
+  if (existing) return existing.className;
+  const className = `p${++pseudoCounter}`;
+  pseudoStyleRegistry.set(key, { className, bundle });
+  return className;
 }
 
 function getOrCreateStyleName(styleObj) {
@@ -90,12 +114,22 @@ function injectHelperStyles(root = document) {
   style.textContent = `
     .web-replica-hover {
       outline: 2px solid red !important;
-      cursor: crosshair !important;
     }
     .web-replica-selected {
       outline: 3px solid blue !important;
+    }
+    /* Cursor needs a boosted-specificity selector: apps like Notion set
+       cursor:text !important on contenteditable areas, which beats a
+       single-class rule even when both are !important. Repeating the class
+       raises specificity above any realistic page selector. */
+    .web-replica-hover.web-replica-hover.web-replica-hover.web-replica-hover.web-replica-hover,
+    .web-replica-selected.web-replica-selected.web-replica-selected.web-replica-selected.web-replica-selected {
       cursor: crosshair !important;
     }
+    /* While picking, force the crosshair page-wide so it applies immediately —
+       even when pick mode starts while the mouse is sitting still on a
+       cursor:pointer element (no mouseover fires to add .web-replica-hover). */
+    html.pluck-picking, html.pluck-picking * { cursor: crosshair !important; }
     /* X-Ray mode - rainbow outlines for layout visualization */
     .pluck-xray * { outline: 1px solid rgba(255, 127, 0, 0.75) !important; }
     .pluck-xray *:nth-child(2n) { outline-color: rgba(255, 127, 0, 0.75) !important; }
@@ -111,6 +145,12 @@ function injectHelperStyles(root = document) {
   } else if (root.appendChild) {
     root.appendChild(style);
   }
+}
+
+// Toggle the page-wide picking crosshair to match pickMode. Called wherever
+// pickMode changes (see the appended applyPickCursor() calls).
+function applyPickCursor() {
+  try { if (document.documentElement) document.documentElement.classList.toggle('pluck-picking', !!pickMode); } catch (e) {}
 }
 
 function ensureStylesInShadow(el) {
@@ -143,6 +183,116 @@ function ensureStylesInEventPath(path) {
   injectHelperStyles(document);
 })();
 
+// Expand a leaf click to its nearest visually-distinct ancestor. Alt-click bypasses.
+function expandToMeaningfulContainer(el) {
+  if (!el || !el.tagName) return el;
+  const tag = el.tagName.toLowerCase();
+
+  if (['div', 'section', 'article', 'aside', 'nav', 'header', 'footer',
+       'main', 'form', 'fieldset', 'ul', 'ol', 'table', 'tbody', 'thead',
+       'tr'].includes(tag)) {
+    return el;
+  }
+
+  const cs = window.getComputedStyle(el);
+
+  if ((tag === 'button' || tag === 'a') &&
+      (cs.position === 'absolute' || cs.position === 'fixed')) {
+    const op = el.offsetParent;
+    if (op && op !== document.body && op !== document.documentElement) {
+      const elArea = el.offsetWidth * el.offsetHeight;
+      const opArea = op.offsetWidth * op.offsetHeight;
+      if (opArea >= elArea * 1.05) return op;
+    }
+  }
+
+  const isLeafish = ['input', 'select', 'textarea', 'button', 'a', 'span',
+                     'img', 'svg', 'label', 'i', 'em', 'strong', 'p',
+                     'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag);
+  if (!isLeafish) return el;
+
+  const startW = el.offsetWidth || el.getBoundingClientRect().width;
+  const startH = el.offsetHeight || el.getBoundingClientRect().height;
+  const startArea = startW * startH;
+  if (!startArea) return el;
+
+  const vpArea = window.innerWidth * window.innerHeight;
+  const maxArea = vpArea * 0.4;
+  const minGrowth = 1.2;
+
+  let current = el.parentElement;
+  let depth = 0;
+  let bestMatch = null;
+
+  while (current && current !== document.body && current !== document.documentElement && depth < 8) {
+    const ccs = window.getComputedStyle(current);
+    const cArea = current.offsetWidth * current.offsetHeight;
+
+    if (cArea > maxArea) break;
+    if (cArea < startArea * minGrowth) {
+      current = current.parentElement;
+      depth++;
+      continue;
+    }
+
+    const hasBg = ccs.backgroundColor && ccs.backgroundColor !== 'rgba(0, 0, 0, 0)' && ccs.backgroundColor !== 'transparent';
+    const hasBorder = parseFloat(ccs.borderTopWidth) > 0 || parseFloat(ccs.borderLeftWidth) > 0;
+    const hasRadius = parseFloat(ccs.borderTopLeftRadius) > 0;
+    const hasShadow = ccs.boxShadow && ccs.boxShadow !== 'none';
+    const hasPadding = parseFloat(ccs.paddingTop) >= 4 || parseFloat(ccs.paddingLeft) >= 4;
+    const isVisuallyDistinct = hasBg || hasBorder || hasRadius || hasShadow || hasPadding;
+
+    const ctag = current.tagName.toLowerCase();
+    const isStructural = ['form', 'fieldset', 'label', 'li', 'tr', 'article',
+                          'section', 'header', 'footer', 'aside', 'nav'].includes(ctag);
+
+    if (isVisuallyDistinct || isStructural) {
+      bestMatch = current;
+      return current;
+    }
+
+    current = current.parentElement;
+    depth++;
+  }
+
+  return bestMatch || el;
+}
+
+// --- Navigation helpers (parent/child walk + Shadow DOM aware) ---
+const SKIP_NAV_TAGS = new Set(['head', 'script', 'style', 'link', 'meta', 'noscript', 'br', 'hr']);
+
+function getNavParent(el) {
+  if (!el) return null;
+  if (el === document.documentElement) return null;
+  if (el.parentElement) return el.parentElement;
+  if (el.parentNode && el.parentNode.host) return el.parentNode.host;
+  if (el.parentNode === document) return document.documentElement;
+  return null;
+}
+
+function getFirstNavChild(el) {
+  if (!el) return null;
+  if (el === document.documentElement) return document.body;
+  const shadowRoot = getShadowRoot(el);
+  const children = shadowRoot ? shadowRoot.children : el.children;
+  if (!children || children.length === 0) return null;
+  for (const child of children) {
+    if (!SKIP_NAV_TAGS.has(child.tagName.toLowerCase())) return child;
+  }
+  return null;
+}
+
+function describeElement(el) {
+  if (!el || !el.tagName) return '';
+  let s = el.tagName.toLowerCase();
+  if (el.id) s += `#${el.id}`;
+  if (el.className && typeof el.className === 'string') {
+    const cls = el.className.split(/\s+/).filter(c => c && !c.startsWith('web-replica-')).slice(0, 2);
+    if (cls.length) s += '.' + cls.join('.');
+  }
+  return s;
+}
+
 // --- Hover handling (with Shadow DOM support) ---
 document.addEventListener(
   "mouseover",
@@ -155,6 +305,15 @@ document.addEventListener(
 
     // Inject styles into any shadow roots along the path (including closed ones!)
     ensureStylesInEventPath(path);
+
+    // Keep the keyboard-navigated target sticky; mouseover would otherwise snap back to the deepest child.
+    if (isNavigating) {
+      if (actualTarget === navigatedElement) return;
+      if (navigatedElement && navigatedElement.contains(actualTarget)) return;
+      isNavigating = false;
+      navigatedElement = null;
+      navBackStack = [];
+    }
 
     if (hoverElement && hoverElement !== actualTarget) {
       if (hoverElement.classList) {
@@ -173,6 +332,20 @@ document.addEventListener(
   "mouseout",
   (e) => {
     if (!pickMode) return;
+
+    if (isNavigating && navigatedElement) {
+      const rel = e.relatedTarget;
+      if (rel && (rel === navigatedElement || navigatedElement.contains(rel))) return;
+      if (hoverElement && hoverElement.classList) {
+        hoverElement.classList.remove("web-replica-hover");
+      }
+      hoverElement = null;
+      isNavigating = false;
+      navigatedElement = null;
+      navBackStack = [];
+      return;
+    }
+
     const actualTarget = e.composedPath()[0];
     if (actualTarget === hoverElement) {
       if (hoverElement && hoverElement.classList) {
@@ -218,10 +391,21 @@ document.addEventListener(
 
     // Use composedPath to get actual target inside Shadow DOM
     const path = e.composedPath();
-    const el = path[0];
-
-    // Inject styles into any shadow roots along the path (including closed ones!)
     ensureStylesInEventPath(path);
+
+    // Alt/Shift bypass smart-expansion; otherwise expand to the nearest container.
+    let el;
+    if (isNavigating && navigatedElement) {
+      el = navigatedElement;
+    } else if (e.altKey || e.shiftKey) {
+      el = path[0];
+    } else {
+      el = expandToMeaningfulContainer(path[0]);
+    }
+
+    isNavigating = false;
+    navigatedElement = null;
+    navBackStack = [];
 
     if (!el || !el.classList) return;
 
@@ -260,7 +444,8 @@ let shortcuts = {
   clearSelect: { ctrl: false, shift: false, alt: false, key: 'Escape' },
   export: { ctrl: true, shift: true, alt: false, key: 'E' },
   xray: { ctrl: true, shift: true, alt: false, key: 'X' },
-  colorPick: { ctrl: true, shift: true, alt: false, key: 'P' }
+  colorPick: { ctrl: true, shift: true, alt: false, key: 'P' },
+  extractPage: { ctrl: true, shift: true, alt: false, key: 'F' }
 };
 
 // Load shortcuts from storage (with context check)
@@ -294,9 +479,7 @@ try {
   console.log('[Pluck] Could not add storage listener:', e.message);
 }
 
-// Detect if running on Mac
-const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0 ||
-              navigator.userAgent.toUpperCase().indexOf('MAC') >= 0;
+const isMac = navigator.userAgent.toUpperCase().includes('MAC');
 
 // Check if a keyboard event matches a shortcut
 // On Mac, Cmd (metaKey) is used instead of Ctrl
@@ -337,7 +520,7 @@ function downloadFiles(toonContent, htmlContent, filename = 'component') {
     toon: toonContent,
     html: htmlContent,
     filename: filename
-  }, (response) => {
+  }, () => {
     if (chrome.runtime.lastError) {
       console.error("[Pluck] Download error:", chrome.runtime.lastError);
     } else {
@@ -372,7 +555,7 @@ async function performExport(filename = 'component') {
 function showFilenamePrompt() {
   // Stop selection mode while export modal is open
   if (pickMode) {
-    pickMode = false;
+    pickMode = false; applyPickCursor();
     if (hoverElement) {
       hoverElement.classList.remove("web-replica-hover");
       hoverElement = null;
@@ -1364,7 +1547,7 @@ function createColorPickerUI() {
 }
 
 // Update the magnifier display
-function updateColorPickerMagnifier(ui, x, y, screenshot, canvas, ctx) {
+function updateColorPickerMagnifier(ui, x, y, canvas, ctx) {
   const pixelRatio = window.devicePixelRatio || 1;
   const sampleX = Math.floor(x * pixelRatio);
   const sampleY = Math.floor(y * pixelRatio);
@@ -1440,21 +1623,13 @@ function updateColorPickerMagnifier(ui, x, y, screenshot, canvas, ctx) {
   return hexColor;
 }
 
-// Copy color to clipboard
 async function copyColorToClipboard(hexColor) {
   try {
     await navigator.clipboard.writeText(hexColor);
     return true;
   } catch (err) {
-    // Fallback
-    const textarea = document.createElement('textarea');
-    textarea.value = hexColor;
-    textarea.style.cssText = 'position:fixed;left:-9999px;top:-9999px;';
-    document.body.appendChild(textarea);
-    textarea.select();
-    document.execCommand('copy');
-    document.body.removeChild(textarea);
-    return true;
+    console.warn('[Pluck] Clipboard write failed:', err);
+    return false;
   }
 }
 
@@ -1470,7 +1645,7 @@ async function toggleColorPickMode() {
     // Disable other modes if active
     if (xrayMode) toggleXrayMode();
     if (pickMode) {
-      pickMode = false;
+      pickMode = false; applyPickCursor();
       if (hoverElement) {
         hoverElement.classList.remove("web-replica-hover");
         hoverElement = null;
@@ -1516,7 +1691,7 @@ async function toggleColorPickMode() {
     const handleMove = (e) => {
       currentColor = updateColorPickerMagnifier(
         ui, e.clientX, e.clientY,
-        null, colorPickerCanvas, colorPickerCtx
+        colorPickerCanvas, colorPickerCtx
       );
     };
 
@@ -1582,12 +1757,53 @@ function destroyColorPicker() {
 
 // Use capturing phase to intercept before page handlers
 document.addEventListener("keydown", (e) => {
+  if (pickMode && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    if (!hoverElement) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    let target = null;
+    if (e.key === 'ArrowUp') {
+      target = getNavParent(hoverElement);
+      if (target && target !== hoverElement) navBackStack.push(hoverElement);
+    } else {
+      const top = navBackStack[navBackStack.length - 1];
+      if (top && top !== hoverElement && hoverElement && hoverElement.contains(top)) {
+        target = top;
+        navBackStack.pop();
+      } else {
+        navBackStack = [];
+        target = getFirstNavChild(hoverElement);
+      }
+    }
+
+    if (!target || !target.classList) return false;
+
+    if (hoverElement && hoverElement.classList) {
+      hoverElement.classList.remove("web-replica-hover");
+    }
+    ensureStylesInShadow(target);
+    hoverElement = target;
+    navigatedElement = target;
+    isNavigating = true;
+    hoverElement.classList.add("web-replica-hover");
+
+    selectedElements.forEach((sel) => sel.classList.remove("web-replica-selected"));
+    selectedElements.clear();
+    selectionClones.clear();
+    toggleElement(target, true);
+
+    showModeIndicator(describeElement(hoverElement));
+    return false;
+  }
+
   // Toggle selection mode (start if off, stop if on)
   if (matchesShortcut(e, shortcuts.startSelect)) {
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
-    pickMode = !pickMode; // Toggle
+    pickMode = !pickMode; applyPickCursor(); // Toggle
     if (pickMode) {
       showModeIndicator('Selection mode ON');
       console.log("[Pluck] Selection mode started");
@@ -1612,7 +1828,12 @@ document.addEventListener("keydown", (e) => {
       selectedElements.forEach((el) => el.classList.remove("web-replica-selected"));
       selectedElements.clear();
       selectionClones.clear();
-      pickMode = false;
+      // Belt-and-suspenders: sweep any lingering outline classes off the DOM
+      // in case state ever desyncs from the tracked set.
+      document.querySelectorAll(".web-replica-selected").forEach((el) => el.classList.remove("web-replica-selected"));
+      if (hoverElement) { hoverElement.classList.remove("web-replica-hover"); hoverElement = null; }
+      document.querySelectorAll(".web-replica-hover").forEach((el) => el.classList.remove("web-replica-hover"));
+      pickMode = false; applyPickCursor();
       showModeIndicator('Selection cleared');
       console.log("[Pluck] Selection cleared");
       return false;
@@ -1630,21 +1851,19 @@ document.addEventListener("keydown", (e) => {
       buildExport().then(result => {
         if (result && result.toon) {
           chrome.storage.local.set({ pluckExportData: result }, () => {
-            chrome.runtime.sendMessage({ type: 'OPEN_PREVIEW_TAB' }, (response) => {
+            chrome.runtime.sendMessage({ type: 'OPEN_PREVIEW_TAB' }, () => {
               if (chrome.runtime.lastError) {
-                // Fallback: open directly if background didn't respond
-                console.warn('[Pluck] Background message failed, opening directly:', chrome.runtime.lastError.message);
-                window.open(chrome.runtime.getURL('preview.html'), '_blank');
+                console.warn('[Pluck] Background message failed:', chrome.runtime.lastError.message);
               }
-              showModeIndicator('Export ready');
+              showModeIndicator('Export ready — open the Pluck dock');
             });
           });
         } else {
-          showModeIndicator('Export failed');
+          showModeIndicator('Nothing selected to export');
         }
       }).catch(err => {
         console.error('[Pluck] Export error:', err);
-        showModeIndicator('Export failed');
+        showModeIndicator(/context invalidated/i.test(err && err.message) ? 'Reload this page — Pluck was updated' : 'Export failed');
       });
     } else {
       showModeIndicator('No elements selected');
@@ -1669,12 +1888,47 @@ document.addEventListener("keydown", (e) => {
     toggleColorPickMode();
     return false;
   }
+
+  if (matchesShortcut(e, shortcuts.extractPage)) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    const body = document.body;
+    if (!body) {
+      showModeIndicator('No body element found');
+      return false;
+    }
+    selectedElements.forEach((sel) => sel.classList.remove("web-replica-selected"));
+    selectedElements.clear();
+    selectionClones.clear();
+    toggleElement(body, true);
+    showModeIndicator('Exporting full page...');
+    buildExport().then(result => {
+      if (result && result.toon) {
+        chrome.storage.local.set({ pluckExportData: result }, () => {
+          chrome.runtime.sendMessage({ type: 'OPEN_PREVIEW_TAB' }, () => {
+            if (chrome.runtime.lastError) {
+              console.warn('[Pluck] Background message failed:', chrome.runtime.lastError.message);
+            }
+            showModeIndicator('Full page exported — open the Pluck dock');
+          });
+        });
+      } else {
+        showModeIndicator('Nothing selected to export');
+      }
+    }).catch(err => {
+      console.error('[Pluck] Full-page export error:', err);
+      showModeIndicator(/context invalidated/i.test(err && err.message) ? 'Reload this page — Pluck was updated' : 'Export failed');
+    });
+    return false;
+  }
 }, true); // true = capturing phase (runs BEFORE page handlers)
 
 // --- Default values to SKIP (only truly useless defaults) ---
 const DEFAULT_SKIP = {
   'position': ['static'],
-  'position': ['static'],
+  'float': ['none'],
+  'clear': ['none'],
   // 'box-sizing': ['content-box'], // REMOVED - We force border-box now
   // Individual margin/padding sides - only skip exact 0
   // Individual margin/padding sides - only skip exact 0
@@ -1698,12 +1952,20 @@ const DEFAULT_SKIP = {
   'flex-grow': ['0'],
   'flex-shrink': ['1'],
   'flex-basis': ['auto'],
-  'align-self': ['auto'],
+  // baseline on icon-only grid items sinks them — let parent's align-items win.
+  'align-self': ['auto', 'baseline'],
+  'justify-self': ['auto', 'normal'],
+  'justify-items': ['legacy', 'normal'],
   'order': ['0'],
   'grid-template-columns': ['none'],
   'grid-template-rows': ['none'],
+  'grid-template-areas': ['none'],
   'grid-column': ['auto'],
   'grid-row': ['auto'],
+  'grid-area': ['auto / auto / auto / auto', 'auto'],
+  'grid-auto-flow': ['row'],
+  'grid-auto-columns': ['auto'],
+  'grid-auto-rows': ['auto'],
   'background-color': ['transparent', 'rgba(0, 0, 0, 0)'],
   'background-image': ['none'],
   'background-size': ['auto'],
@@ -1712,6 +1974,15 @@ const DEFAULT_SKIP = {
   'opacity': ['1'],
   'border-width': ['0px'],
   'border-style': ['none'],
+  // Per-side longhand defaults — keep sides without a real border out of classes.
+  'border-top-width': ['0px'],
+  'border-right-width': ['0px'],
+  'border-bottom-width': ['0px'],
+  'border-left-width': ['0px'],
+  'border-top-style': ['none'],
+  'border-right-style': ['none'],
+  'border-bottom-style': ['none'],
+  'border-left-style': ['none'],
   'border-radius': ['0px'],
   'box-shadow': ['none'],
   'outline': ['none'],
@@ -1745,7 +2016,7 @@ const DEFAULT_SKIP = {
 // Capture all important properties, use longhand for margin/padding to preserve individual sides
 const SHARED_PROPS = [
   // Layout
-  'display', 'position', // 'box-sizing', // REMOVED - forcing border-box manually
+  'display', 'position', 'float', 'clear', // 'box-sizing', // REMOVED - forcing border-box manually
   // Spacing - use longhand to capture individual sides correctly
   'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
   'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
@@ -1756,14 +2027,22 @@ const SHARED_PROPS = [
   // Flex item
   'flex-grow', 'flex-shrink', 'flex-basis', 'align-self', 'order',
   // Grid
-  'grid-template-columns', 'grid-template-rows', 'grid-column', 'grid-row',
+  'grid-template-columns', 'grid-template-rows', 'grid-template-areas',
+  'grid-column', 'grid-row', 'grid-area',
+  'grid-auto-flow', 'grid-auto-columns', 'grid-auto-rows',
+  'justify-self', 'justify-items',
   // Position offsets
   'top', 'right', 'bottom', 'left', 'z-index',
   // Background
   'background-color', 'background-image', 'background-size', 'background-position', 'background-repeat',
   // Visual
   'color', 'opacity',
-  'border-width', 'border-style', 'border-color', 'border-radius',
+  'border-width', 'border-style', 'border-color',
+  // Longhands needed so `border-bottom: 2px solid` survives the shorthand collapse.
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
+  'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+  'border-radius',
   'box-shadow', 'outline',
   // Text
   'font-family', 'font-size', 'font-weight', 'line-height', 'text-align',
@@ -1782,6 +2061,151 @@ const SHARED_PROPS = [
   // Scrollbar styling (standard properties that can be captured)
   'scrollbar-width', 'scrollbar-color'
 ];
+
+// --- Properties captured on ::before / ::after pseudo-elements ---
+const PSEUDO_PROPS = [
+  'display',
+  'position', 'top', 'right', 'bottom', 'left', 'z-index',
+  'width', 'height',
+  'background-color', 'background-image', 'background-size',
+  'background-position', 'background-repeat',
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
+  'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+  'border-radius',
+  'box-shadow',
+  'color', 'opacity',
+  'transform', 'transform-origin',
+  'filter',
+  'font-family', 'font-size', 'font-weight', 'line-height',
+  'text-align', 'vertical-align',
+  'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'overflow', 'overflow-x', 'overflow-y',
+  'pointer-events',
+];
+
+const VOID_ELEMENT_TAGS = new Set(['img', 'input', 'br', 'hr', 'meta', 'link', 'source', 'track', 'wbr', 'area', 'col', 'embed', 'param']);
+
+function isDecorativePseudo(style) {
+  const bg = style.getPropertyValue('background-color');
+  const bgImg = style.getPropertyValue('background-image');
+  const transform = style.getPropertyValue('transform');
+  const shadow = style.getPropertyValue('box-shadow');
+  const borderTop = parseFloat(style.getPropertyValue('border-top-width')) || 0;
+  const borderLeft = parseFloat(style.getPropertyValue('border-left-width')) || 0;
+  const w = parseFloat(style.getPropertyValue('width')) || 0;
+  const h = parseFloat(style.getPropertyValue('height')) || 0;
+  if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') return true;
+  if (bgImg && bgImg !== 'none') return true;
+  if (transform && transform !== 'none') return true;
+  if (shadow && shadow !== 'none') return true;
+  if (borderTop > 0 || borderLeft > 0) return true;
+  if (w > 0 && h > 0) return true;
+  return false;
+}
+
+function capturePseudoStyles(pseudoStyle) {
+  const captured = {};
+  const positionValue = pseudoStyle.getPropertyValue('position');
+  for (const prop of PSEUDO_PROPS) {
+    if (['top', 'right', 'bottom', 'left'].includes(prop) && positionValue === 'static') continue;
+
+    const borderSideMatch = prop.match(/^border-(top|right|bottom|left)-(width|style|color)$/);
+    if (borderSideMatch) {
+      const side = borderSideMatch[1];
+      const sideWidth = parseFloat(pseudoStyle.getPropertyValue(`border-${side}-width`)) || 0;
+      const sideStyle = pseudoStyle.getPropertyValue(`border-${side}-style`);
+      if (sideWidth <= 0 || sideStyle === 'none' || sideStyle === 'hidden') continue;
+    }
+
+    let value = pseudoStyle.getPropertyValue(prop);
+    if (isDefaultValue(prop, value)) continue;
+    if (prop.includes('color') || prop === 'background-color') {
+      const hex = rgbToHex(value);
+      if (!hex) continue;
+      value = hex;
+    }
+    if (prop === 'font-family') {
+      const short = shortenFontFamily(value);
+      if (!short) continue;
+      value = short;
+    }
+    captured[prop] = value;
+  }
+  return captured;
+}
+
+function tryCapturePseudo(originalEl, position) {
+  const style = window.getComputedStyle(originalEl, '::' + position);
+  const content = style.getPropertyValue('content');
+  if (!content || content === 'none' || content === 'normal') return null;
+  const cleaned = content.replace(/^["']|["']$/g, '');
+  const hasContent = cleaned.length > 0;
+  const hasDecoration = isDecorativePseudo(style);
+  if (!hasContent && !hasDecoration) return null;
+  const styles = capturePseudoStyles(style);
+  if (!hasContent && Object.keys(styles).length === 0) return null;
+  return { content: cleaned, styles };
+}
+
+function escapePseudoContent(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+// --- Parent-context wrapper ---
+function getLayoutParent(el) {
+  if (!el) return null;
+  const cs = window.getComputedStyle(el);
+  if (cs.position === 'absolute' || cs.position === 'fixed') {
+    return el.offsetParent || el.parentElement;
+  }
+  return el.parentElement;
+}
+
+const LAYOUT_PARENT_PROPS = [
+  'display',
+  'flex-direction', 'flex-wrap', 'justify-content', 'align-items',
+  'align-content', 'gap', 'row-gap', 'column-gap',
+  'grid-template-columns', 'grid-template-rows', 'grid-template-areas',
+  'grid-auto-flow', 'grid-auto-columns', 'grid-auto-rows',
+  'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'background-color',
+  'position',
+  'border-radius',
+];
+
+function captureLayoutParentStyles(parent, hasPositionedChildren) {
+  if (!parent) return {};
+  const cs = window.getComputedStyle(parent);
+  const captured = {};
+  for (const prop of LAYOUT_PARENT_PROPS) {
+    let value = cs.getPropertyValue(prop);
+    if (isDefaultValue(prop, value)) continue;
+    if (prop === 'position' && value === 'static') continue;
+    if (prop.includes('color') || prop === 'background-color') {
+      const hex = rgbToHex(value);
+      if (!hex) continue;
+      value = hex;
+    }
+    captured[prop] = value;
+  }
+  if (hasPositionedChildren && (!captured['position'] || captured['position'] === 'static')) {
+    captured['position'] = 'relative';
+  }
+  return captured;
+}
+
+// --- Inherited props: skip on descendants when parent's value matches ---
+const INHERITED_PROPS = new Set([
+  'color', 'font-family', 'font-size', 'font-weight', 'font-style',
+  'font-variant', 'line-height', 'letter-spacing', 'word-spacing',
+  'text-align', 'text-indent', 'text-transform', 'text-decoration',
+  'white-space', 'word-break', 'overflow-wrap', 'hyphens', 'tab-size',
+  'cursor', 'pointer-events', 'user-select',
+  '-webkit-font-smoothing', '-moz-osx-font-smoothing', 'text-rendering',
+  'font-optical-sizing', 'font-variant-ligatures',
+]);
 
 // --- Properties for INLINE styles (unique per element) ---
 const INLINE_PROPS = []; // Dimensions handled manually now
@@ -1875,6 +2299,15 @@ function shortenFontFamily(value) {
   const fonts = value.split(',').map(f => f.trim().replace(/["']/g, ''));
   const first = fonts[0].toLowerCase();
 
+  // A lone "Times"/"Times New Roman"/"serif" is the browser's DEFAULT serif — it
+  // means the page never set a real font on this element (e.g. Snowflake sets fonts
+  // only on deep text classes). Emitting it forces serif in the export, where the
+  // body reset is sans. Drop it so the element inherits the export's sans stack and
+  // matches what the live page actually shows.
+  if (fonts.length === 1 && ['times', 'times new roman', 'serif'].includes(first)) {
+    return null;
+  }
+
   // Detect web fonts that need to be loaded
   const webFonts = ['mona sans', 'inter', 'roboto', 'open sans', 'lato', 'montserrat', 'poppins', 'nunito', 'raleway', 'source sans', 'ubuntu', 'fira sans'];
   for (const font of fonts) {
@@ -1906,12 +2339,48 @@ function getDetectedFonts() {
 // --- WOFF/Custom Font Embedding ---
 // Detect font format from URL
 function detectFontFormat(url) {
-  if (url.includes('.woff2')) return 'woff2';
-  if (url.includes('.woff')) return 'woff';
-  if (url.includes('.ttf')) return 'truetype';
-  if (url.includes('.otf')) return 'opentype';
-  if (url.includes('.eot')) return 'embedded-opentype';
-  return 'woff2'; // default
+  // Strip query/fragment so `foo.woff2?v=3` still matches.
+  const path = (url || '').split('#')[0].split('?')[0].toLowerCase();
+  if (path.endsWith('.woff2')) return 'woff2';
+  if (path.endsWith('.woff')) return 'woff';
+  if (path.endsWith('.ttf')) return 'truetype';
+  if (path.endsWith('.otf')) return 'opentype';
+  if (path.endsWith('.eot')) return 'embedded-opentype';
+  // Unknown: drop. Pretending it's woff2 produced broken @font-face rules.
+  return null;
+}
+
+// chrome.runtime.sendMessage(FETCH_FONT) with a HARD timeout. Without this a slow
+// or hung font/stylesheet URL leaves the await pending forever and the export sits
+// on "Exporting…" until the socket dies — the AWS hang, but it slowed every site.
+function bgFetch(url, timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const done = (v) => { if (!settled) { settled = true; if (timer) clearTimeout(timer); resolve(v); } };
+    timer = setTimeout(() => done({ ok: false, error: 'timeout' }), timeoutMs);
+    try {
+      chrome.runtime.sendMessage({ type: 'FETCH_FONT', url }, (response) => {
+        if (chrome.runtime.lastError) done({ ok: false, error: chrome.runtime.lastError.message });
+        else done(response);
+      });
+    } catch (e) { done({ ok: false, error: e && e.message }); }
+  });
+}
+
+// Memoized stylesheet-text fetch (base64 -> utf8). The network-font family scan used
+// to re-fetch EVERY stylesheet once per network font — O(fonts × sheets) round-trips,
+// which is what made big font-heavy pages crawl. Cache keyed by href; cleared per export.
+const _sheetCssCache = new Map();
+async function getSheetCssText(href) {
+  if (_sheetCssCache.has(href)) return _sheetCssCache.get(href);
+  const resp = await bgFetch(href);
+  let css = null;
+  if (resp && resp.ok && resp.dataUrl) {
+    try { css = atob(resp.dataUrl.split(',')[1]); } catch (e) { css = null; }
+  }
+  _sheetCssCache.set(href, css);
+  return css;
 }
 
 // Fetch a font file and convert to base64 data URL
@@ -1921,33 +2390,16 @@ async function fetchFontAsBase64(url) {
     // Handle relative URLs
     const absoluteUrl = new URL(url, window.location.href).href;
 
-    // First, try using the background script (bypasses CORS)
-    try {
-      const response = await new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          { type: 'FETCH_FONT', url: absoluteUrl },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              resolve({ ok: false, error: chrome.runtime.lastError.message });
-            } else {
-              resolve(response);
-            }
-          }
-        );
-      });
-
-      if (response && response.ok && response.dataUrl) {
-        console.log('[Pluck] Font fetched via background script:', absoluteUrl);
-        return response.dataUrl;
-      } else {
-        console.warn('[Pluck] Background fetch failed:', response?.error);
-      }
-    } catch (bgError) {
-      console.warn('[Pluck] Background script error:', bgError.message);
+    // First, try using the background script (bypasses CORS), time-boxed.
+    const bg = await bgFetch(absoluteUrl);
+    if (bg && bg.ok && bg.dataUrl) {
+      return bg.dataUrl;
     }
+    console.warn('[Pluck] Background fetch failed:', bg && bg.error);
 
-    // Fallback: try direct fetch (works for same-origin or CORS-enabled fonts)
-    const response = await fetch(absoluteUrl, { mode: 'cors' });
+    // Fallback: try direct fetch (works for same-origin or CORS-enabled fonts), time-boxed
+    // so a hanging response can't stall the export.
+    const response = await fetch(absoluteUrl, { mode: 'cors', signal: AbortSignal.timeout(4000) });
     if (!response.ok) return null;
 
     const blob = await response.blob();
@@ -1990,6 +2442,7 @@ function parseFontFacesFromText(cssText, fontFaces) {
     const style = styleMatch ? styleMatch[1].trim() : 'normal';
 
     const format = detectFontFormat(url);
+    if (!format) continue;
     const key = `${family}-${weight}-${style}`;
 
     fontFaces.set(key, { family, url, format, weight, style });
@@ -2033,12 +2486,16 @@ function extractFontsFromNetwork() {
 // Extract @font-face rules from all stylesheets
 async function extractFontFaces() {
   const fontFaces = new Map();
+  _sheetCssCache.clear(); // fresh per export; memoizes sheet fetches within this run
 
-  // First, get fonts from stylesheets (more accurate - has family names)
+  // First, get fonts from stylesheets (more accurate - has family names).
+  // CORS-blocked sheets can't be read directly — collect their hrefs and fetch them
+  // ALL in parallel afterward instead of awaiting one at a time (the serial awaits
+  // were the remaining slow-down on sites with many cross-origin stylesheets).
+  const corsBlockedHrefs = [];
   for (const sheet of document.styleSheets) {
     try {
-      // Try direct access to cssRules
-      const rules = sheet.cssRules || sheet.rules;
+      const rules = sheet.cssRules;
       if (!rules) continue;
 
       for (const rule of rules) {
@@ -2072,6 +2529,10 @@ async function extractFontFaces() {
           if (urlMatch) {
             const url = urlMatch[1];
             const format = detectFontFormat(url);
+            if (!format) {
+              console.log('[Pluck] Skipping unrecognised font format:', url);
+              continue;
+            }
             const key = `${family}-${weight}-${style}`;
 
             fontFaces.set(key, { family, url, format, weight, style });
@@ -2080,39 +2541,20 @@ async function extractFontFaces() {
         }
       }
     } catch (e) {
-      // CORS blocked - try fetching the stylesheet via background script (bypasses CORS)
-      if (sheet.href) {
-        try {
-          const response = await new Promise((resolve) => {
-            chrome.runtime.sendMessage(
-              { type: 'FETCH_FONT', url: sheet.href },
-              (response) => {
-                if (chrome.runtime.lastError) {
-                  resolve({ ok: false, error: chrome.runtime.lastError.message });
-                } else {
-                  resolve(response);
-                }
-              }
-            );
-          });
-
-          if (response && response.ok && response.dataUrl) {
-            // Decode the base64 CSS text
-            try {
-              const cssText = atob(response.dataUrl.split(',')[1]);
-              parseFontFacesFromText(cssText, fontFaces);
-              console.log('[Pluck] Parsed CORS-blocked stylesheet via background:', sheet.href);
-            } catch (decodeError) {
-              console.log('[Pluck] Could not decode stylesheet:', sheet.href);
-            }
-          }
-        } catch (fetchError) {
-          // Skip this stylesheet - can't access it
-          console.log('[Pluck] Could not access stylesheet:', sheet.href);
-        }
-      }
+      // CORS blocked - remember it; fetched in parallel below.
+      if (sheet.href) corsBlockedHrefs.push(sheet.href);
     }
   }
+
+  // Fetch every CORS-blocked stylesheet at once (getSheetCssText memoizes, so dupes
+  // collapse); parse each for @font-face rules as it arrives.
+  await Promise.all(corsBlockedHrefs.map(async (href) => {
+    const cssText = await getSheetCssText(href);
+    if (cssText) {
+      parseFontFacesFromText(cssText, fontFaces);
+      console.log('[Pluck] Parsed CORS-blocked stylesheet via background:', href);
+    }
+  }));
 
   // Then, get fonts from network requests (catches dynamically loaded fonts)
   const networkFonts = extractFontsFromNetwork();
@@ -2136,50 +2578,31 @@ async function extractFontFaces() {
       // Try to find the font-family by fetching and parsing stylesheets via background script
       let foundFamily = null;
 
-      // Search through stylesheets we couldn't access directly
+      // Search through stylesheets we couldn't access directly. getSheetCssText is
+      // memoized, so each sheet is fetched at most once for the whole export.
       for (const sheet of document.styleSheets) {
         if (sheet.href) {
-          try {
-            // Try to fetch the stylesheet via background script (bypasses CORS)
-            const response = await new Promise((resolve) => {
-              chrome.runtime.sendMessage(
-                { type: 'FETCH_FONT', url: sheet.href },
-                (response) => {
-                  if (chrome.runtime.lastError) {
-                    resolve({ ok: false });
-                  } else {
-                    resolve(response);
-                  }
-                }
-              );
-            });
-
-            if (response && response.ok && response.dataUrl) {
-              // Decode the base64 CSS text
-              const cssText = atob(response.dataUrl.split(',')[1]);
-
-              // Look for @font-face rules that reference this font URL
-              const fontFaceRegex = /@font-face\s*\{([^}]+)\}/gi;
-              let match;
-              while ((match = fontFaceRegex.exec(cssText)) !== null) {
-                const block = match[1];
-                // Check if this @font-face references our font URL
-                if (block.includes(url) || block.includes(url.split('/').pop())) {
-                  const familyMatch = block.match(/font-family\s*:\s*["']?([^"';\n]+)["']?/i);
-                  if (familyMatch) {
-                    foundFamily = familyMatch[1].trim();
-                    // Also extract weight/style
-                    const weightMatch = block.match(/font-weight\s*:\s*([^;\n]+)/i);
-                    const styleMatch = block.match(/font-style\s*:\s*([^;\n]+)/i);
-                    if (weightMatch) font.weight = weightMatch[1].trim();
-                    if (styleMatch) font.style = styleMatch[1].trim();
-                    break;
-                  }
+          const cssText = await getSheetCssText(sheet.href);
+          if (cssText) {
+            // Look for @font-face rules that reference this font URL
+            const fontFaceRegex = /@font-face\s*\{([^}]+)\}/gi;
+            let match;
+            while ((match = fontFaceRegex.exec(cssText)) !== null) {
+              const block = match[1];
+              // Check if this @font-face references our font URL
+              if (block.includes(url) || block.includes(url.split('/').pop())) {
+                const familyMatch = block.match(/font-family\s*:\s*["']?([^"';\n]+)["']?/i);
+                if (familyMatch) {
+                  foundFamily = familyMatch[1].trim();
+                  // Also extract weight/style
+                  const weightMatch = block.match(/font-weight\s*:\s*([^;\n]+)/i);
+                  const styleMatch = block.match(/font-style\s*:\s*([^;\n]+)/i);
+                  if (weightMatch) font.weight = weightMatch[1].trim();
+                  if (styleMatch) font.style = styleMatch[1].trim();
+                  break;
                 }
               }
             }
-          } catch (e) {
-            // Couldn't fetch this stylesheet
           }
         }
         if (foundFamily) break;
@@ -2219,12 +2642,17 @@ function collectUsedFontFamilies(nodes) {
     if (node.inlineStyle) {
       extractFromStyle(node.inlineStyle);
     }
-    // Check style class reference
+    // Check style class reference. Registry KEYS are JSON.stringify(styleObj),
+    // so the CSS-syntax regex in extractFromStyle never matched (`"font-family":`
+    // has a quote before the colon) — every used font was dropped and nothing got
+    // embedded. Parse the JSON and read the family directly.
     if (node.style && styleRegistry) {
-      // Look up the actual CSS from the registry
       for (const [styleJson, name] of styleRegistry.entries()) {
         if (name === node.style) {
-          extractFromStyle(styleJson);
+          try {
+            const ff = JSON.parse(styleJson)['font-family'];
+            if (ff) ff.split(',').forEach((f) => { const c = f.trim().replace(/["']/g, ''); if (c) families.add(c); });
+          } catch (e) { extractFromStyle(styleJson); }
           break;
         }
       }
@@ -2275,7 +2703,7 @@ function filterUsedFonts(fontFaces, usedFontFamilies) {
 function generateFontFaceCSS(embeddedFonts) {
   let css = '';
 
-  for (const [key, font] of embeddedFonts) {
+  for (const font of embeddedFonts.values()) {
     // Skip fonts without a valid family name or data URL
     if (!font.dataUrl || !font.family || font.family === 'Unknown') {
       console.log('[Pluck] Skipping font without valid family/data:', font.family, font.url);
@@ -2311,8 +2739,8 @@ function isElementVisible(computed) {
   const clipPath = computed.clipPath || '';
   const position = computed.position || '';
 
-  // Detect sr-only patterns: tiny size + absolute positioning
-  if (position === 'absolute' && (width <= 1 || height <= 1)) {
+  // sr-only: require BOTH dims tiny — a 1×24 element is a real divider, not sr-only.
+  if (position === 'absolute' && width <= 1 && height <= 1) {
     return false;
   }
 
@@ -2330,9 +2758,8 @@ function isElementVisible(computed) {
 // --- Get hover styles by comparing normal vs hover state ---
 // NOTE: Disabled event dispatch as it causes side effects on sites like GitHub
 // (e.g., ProTip tooltips cycling, dynamic content changing)
-function getHoverStyles(el, normalStyles) {
-  // Disabled for now - dispatching mouse events causes too many side effects
-  // on dynamic sites like GitHub where tooltips and other elements respond to hover
+function getHoverStyles(_el, _normalStyles) {
+  // Disabled: dispatching mouse events caused tooltip cycling on GitHub etc.
   return null;
 
   /* Original implementation (disabled due to side effects):
@@ -2384,12 +2811,248 @@ function isTailwindPage() {
   return false;
 }
 
+// --- CSS style object -> Tailwind utility class string ---
+// Used when the source page is Tailwind-built; JSX output then reads as
+// idiomatic utilities rather than `className={s1}` references to deduped CSS.
+// Covers the common 90% with arbitrary-value fallbacks (e.g. `gap-[13px]`) for
+// everything else, so output is always valid even on uncommon values.
+
+const TW_SPACING = { // px -> Tailwind spacing scale step (0.25rem = 4px)
+  '0px': '0', '1px': 'px', '2px': '0.5', '4px': '1', '6px': '1.5', '8px': '2',
+  '10px': '2.5', '12px': '3', '14px': '3.5', '16px': '4', '20px': '5',
+  '24px': '6', '28px': '7', '32px': '8', '36px': '9', '40px': '10',
+  '44px': '11', '48px': '12', '56px': '14', '64px': '16', '80px': '20',
+  '96px': '24', '112px': '28', '128px': '32', '160px': '40', '192px': '48',
+  '224px': '56', '256px': '64',
+};
+const TW_RADIUS = {
+  '0px': 'rounded-none', '2px': 'rounded-sm', '4px': 'rounded', '6px': 'rounded-md',
+  '8px': 'rounded-lg', '12px': 'rounded-xl', '16px': 'rounded-2xl', '24px': 'rounded-3xl',
+  '9999px': 'rounded-full', '50%': 'rounded-full',
+};
+const TW_FONT_WEIGHT = {
+  '100': 'font-thin', '200': 'font-extralight', '300': 'font-light',
+  '400': 'font-normal', '500': 'font-medium', '600': 'font-semibold',
+  '700': 'font-bold', '800': 'font-extrabold', '900': 'font-black',
+  'normal': 'font-normal', 'bold': 'font-bold',
+};
+const TW_FONT_SIZE = {
+  '12px': 'text-xs', '14px': 'text-sm', '16px': 'text-base', '18px': 'text-lg',
+  '20px': 'text-xl', '24px': 'text-2xl', '30px': 'text-3xl', '36px': 'text-4xl',
+  '48px': 'text-5xl', '60px': 'text-6xl', '72px': 'text-7xl', '96px': 'text-8xl',
+  '128px': 'text-9xl',
+};
+const TW_OPACITY = {
+  '0': 'opacity-0', '0.05': 'opacity-5', '0.1': 'opacity-10', '0.2': 'opacity-20',
+  '0.25': 'opacity-25', '0.3': 'opacity-30', '0.4': 'opacity-40', '0.5': 'opacity-50',
+  '0.6': 'opacity-60', '0.7': 'opacity-70', '0.75': 'opacity-75', '0.8': 'opacity-80',
+  '0.9': 'opacity-90', '0.95': 'opacity-95', '1': 'opacity-100',
+};
+const TW_JUSTIFY = {
+  'flex-start': 'justify-start', 'flex-end': 'justify-end', 'center': 'justify-center',
+  'space-between': 'justify-between', 'space-around': 'justify-around',
+  'space-evenly': 'justify-evenly', 'start': 'justify-start', 'end': 'justify-end',
+};
+const TW_ALIGN = {
+  'flex-start': 'items-start', 'flex-end': 'items-end', 'center': 'items-center',
+  'baseline': 'items-baseline', 'stretch': 'items-stretch', 'start': 'items-start', 'end': 'items-end',
+};
+const TW_TEXT_ALIGN = {
+  'left': 'text-left', 'center': 'text-center', 'right': 'text-right',
+  'justify': 'text-justify', 'start': 'text-start', 'end': 'text-end',
+};
+
+function _twSpacing(prefix, val) {
+  if (val in TW_SPACING) return `${prefix}-${TW_SPACING[val]}`;
+  return `${prefix}-[${val}]`;
+}
+function _twSize(prefix, val) {
+  if (val === '100%') return `${prefix}-full`;
+  if (val === 'auto') return `${prefix}-auto`;
+  if (val === '50%') return `${prefix}-1/2`;
+  if (val === '0px' || val === '0') return `${prefix}-0`;
+  if (val in TW_SPACING) return `${prefix}-${TW_SPACING[val]}`;
+  return `${prefix}-[${val}]`;
+}
+
+function styleObjToTailwind(styleObj) {
+  const classes = [];
+  const push = (c) => { if (c) classes.push(c); };
+
+  for (const [prop, raw] of Object.entries(styleObj)) {
+    const val = String(raw).trim();
+    switch (prop) {
+      case 'display': {
+        const map = { 'flex': 'flex', 'inline-flex': 'inline-flex', 'grid': 'grid',
+          'inline-grid': 'inline-grid', 'block': 'block', 'inline-block': 'inline-block',
+          'inline': 'inline', 'none': 'hidden', 'table': 'table', 'contents': 'contents' };
+        push(map[val] || `[display:${val}]`);
+        break;
+      }
+      case 'flex-direction':
+        push({ 'row': 'flex-row', 'row-reverse': 'flex-row-reverse',
+          'column': 'flex-col', 'column-reverse': 'flex-col-reverse' }[val]);
+        break;
+      case 'flex-wrap':
+        push({ 'wrap': 'flex-wrap', 'nowrap': 'flex-nowrap', 'wrap-reverse': 'flex-wrap-reverse' }[val]);
+        break;
+      case 'justify-content': push(TW_JUSTIFY[val] || `[justify-content:${val}]`); break;
+      case 'align-items': push(TW_ALIGN[val] || `[align-items:${val}]`); break;
+      case 'align-self':
+        push({ 'auto': '', 'flex-start': 'self-start', 'flex-end': 'self-end',
+          'center': 'self-center', 'stretch': 'self-stretch', 'baseline': 'self-baseline' }[val]);
+        break;
+      case 'align-content':
+        push({ 'flex-start': 'content-start', 'flex-end': 'content-end',
+          'center': 'content-center', 'space-between': 'content-between',
+          'space-around': 'content-around', 'stretch': 'content-stretch' }[val]);
+        break;
+      case 'flex-grow': push(val === '1' ? 'grow' : val === '0' ? 'grow-0' : `grow-[${val}]`); break;
+      case 'flex-shrink': push(val === '1' ? 'shrink' : val === '0' ? 'shrink-0' : `shrink-[${val}]`); break;
+      case 'gap': push(_twSpacing('gap', val)); break;
+      case 'row-gap': push(_twSpacing('gap-y', val)); break;
+      case 'column-gap': push(_twSpacing('gap-x', val)); break;
+
+      case 'padding-top': push(_twSpacing('pt', val)); break;
+      case 'padding-right': push(_twSpacing('pr', val)); break;
+      case 'padding-bottom': push(_twSpacing('pb', val)); break;
+      case 'padding-left': push(_twSpacing('pl', val)); break;
+      case 'margin-top': push(_twSpacing('mt', val)); break;
+      case 'margin-right': push(_twSpacing('mr', val)); break;
+      case 'margin-bottom': push(_twSpacing('mb', val)); break;
+      case 'margin-left': push(_twSpacing('ml', val)); break;
+
+      case 'width': push(_twSize('w', val)); break;
+      case 'height': push(_twSize('h', val)); break;
+      case 'min-width': push(_twSize('min-w', val)); break;
+      case 'min-height': push(_twSize('min-h', val)); break;
+      case 'max-width': push(val === 'none' ? 'max-w-none' : _twSize('max-w', val)); break;
+      case 'max-height': push(val === 'none' ? 'max-h-none' : _twSize('max-h', val)); break;
+
+      case 'position':
+        push({ 'static': 'static', 'relative': 'relative', 'absolute': 'absolute',
+          'fixed': 'fixed', 'sticky': 'sticky' }[val]);
+        break;
+      case 'top': push(_twSize('top', val)); break;
+      case 'right': push(_twSize('right', val)); break;
+      case 'bottom': push(_twSize('bottom', val)); break;
+      case 'left': push(_twSize('left', val)); break;
+      case 'z-index': push(/^-?\d+$/.test(val) ? `z-[${val}]` : null); break;
+
+      case 'background-color':
+        push(val === 'transparent' ? 'bg-transparent' : `bg-[${val}]`);
+        break;
+      case 'color': push(`text-[${val}]`); break;
+      case 'opacity': push(TW_OPACITY[val] || `opacity-[${val}]`); break;
+
+      case 'font-size': push(TW_FONT_SIZE[val] || `text-[${val}]`); break;
+      case 'font-weight': push(TW_FONT_WEIGHT[val] || `font-[${val}]`); break;
+      case 'font-style':
+        push({ 'italic': 'italic', 'normal': 'not-italic' }[val]);
+        break;
+      case 'font-family': push(`font-[${val.replace(/\s+/g, '_')}]`); break;
+      case 'line-height':
+        push({ '1': 'leading-none', '1.25': 'leading-tight', '1.375': 'leading-snug',
+          '1.5': 'leading-normal', '1.625': 'leading-relaxed', '2': 'leading-loose' }[val]
+          || `leading-[${val}]`);
+        break;
+      case 'letter-spacing':
+        push({ 'normal': 'tracking-normal', '-0.05em': 'tracking-tighter',
+          '-0.025em': 'tracking-tight', '0.025em': 'tracking-wide',
+          '0.05em': 'tracking-wider', '0.1em': 'tracking-widest' }[val]
+          || `tracking-[${val}]`);
+        break;
+      case 'text-align': push(TW_TEXT_ALIGN[val]); break;
+      case 'text-transform':
+        push({ 'uppercase': 'uppercase', 'lowercase': 'lowercase',
+          'capitalize': 'capitalize', 'none': 'normal-case' }[val]);
+        break;
+      case 'text-decoration': {
+        // computed value: "<line> <style> <color>" — first token wins.
+        const td = val.split(/\s+/)[0];
+        push({ 'underline': 'underline', 'line-through': 'line-through',
+          'overline': 'overline', 'none': 'no-underline' }[td]);
+        break;
+      }
+      case 'white-space':
+        push({ 'normal': 'whitespace-normal', 'nowrap': 'whitespace-nowrap',
+          'pre': 'whitespace-pre', 'pre-line': 'whitespace-pre-line',
+          'pre-wrap': 'whitespace-pre-wrap' }[val]);
+        break;
+
+      case 'border-radius':
+        push(TW_RADIUS[val] || `rounded-[${val}]`);
+        break;
+      case 'border-width':
+        push(val === '0px' ? 'border-0' : val === '1px' ? 'border'
+          : val === '2px' ? 'border-2' : val === '4px' ? 'border-4'
+          : val === '8px' ? 'border-8' : `border-[${val}]`);
+        break;
+      case 'border-color': push(`border-[${val}]`); break;
+      case 'border-style':
+        push({ 'solid': 'border-solid', 'dashed': 'border-dashed',
+          'dotted': 'border-dotted', 'double': 'border-double', 'none': 'border-none' }[val]);
+        break;
+
+      case 'box-shadow': push(val === 'none' ? 'shadow-none' : `shadow-[${val.replace(/\s+/g, '_')}]`); break;
+      case 'overflow':
+        push({ 'auto': 'overflow-auto', 'hidden': 'overflow-hidden',
+          'visible': 'overflow-visible', 'scroll': 'overflow-scroll', 'clip': 'overflow-clip' }[val]);
+        break;
+      case 'overflow-x':
+        push({ 'auto': 'overflow-x-auto', 'hidden': 'overflow-x-hidden',
+          'visible': 'overflow-x-visible', 'scroll': 'overflow-x-scroll' }[val]);
+        break;
+      case 'overflow-y':
+        push({ 'auto': 'overflow-y-auto', 'hidden': 'overflow-y-hidden',
+          'visible': 'overflow-y-visible', 'scroll': 'overflow-y-scroll' }[val]);
+        break;
+      case 'cursor':
+        push({ 'auto': '', 'pointer': 'cursor-pointer', 'default': 'cursor-default',
+          'wait': 'cursor-wait', 'text': 'cursor-text', 'move': 'cursor-move',
+          'not-allowed': 'cursor-not-allowed', 'grab': 'cursor-grab',
+          'grabbing': 'cursor-grabbing' }[val] || `cursor-[${val}]`);
+        break;
+      case 'pointer-events':
+        push({ 'none': 'pointer-events-none', 'auto': 'pointer-events-auto' }[val]);
+        break;
+      case 'user-select':
+        push({ 'none': 'select-none', 'text': 'select-text',
+          'all': 'select-all', 'auto': 'select-auto' }[val]);
+        break;
+      case 'object-fit':
+        push({ 'contain': 'object-contain', 'cover': 'object-cover',
+          'fill': 'object-fill', 'none': 'object-none', 'scale-down': 'object-scale-down' }[val]);
+        break;
+      case 'transform':
+        push(val === 'none' ? '' : `[transform:${val.replace(/\s+/g, '_')}]`);
+        break;
+      case 'filter':
+        push(val === 'none' ? '' : `[filter:${val.replace(/\s+/g, '_')}]`);
+        break;
+      case 'backdrop-filter':
+      case '-webkit-backdrop-filter':
+        push(val === 'none' ? '' : `[backdrop-filter:${val.replace(/\s+/g, '_')}]`);
+        break;
+
+      default:
+        // Per-side border longhands, grid-*, anything else: arbitrary value.
+        if (prop.startsWith('--')) break;
+        push(`[${prop}:${val.replace(/\s+/g, '_')}]`);
+    }
+  }
+
+  // Dedupe + drop empty strings.
+  return Array.from(new Set(classes.filter(Boolean))).join(' ');
+}
+
 function getCompactStyles(el, isRoot = false) {
   const hadHover = el.classList.contains("web-replica-hover");
   const hadSelected = el.classList.contains("web-replica-selected");
   el.classList.remove("web-replica-hover", "web-replica-selected");
 
   const computed = window.getComputedStyle(el);
+  const parentComputed = !isRoot && el.parentElement ? window.getComputedStyle(el.parentElement) : null;
   const shared = {};   // Goes into CSS class (deduplicated)
   const inline = {};   // Goes into style attribute (unique per element)
 
@@ -2423,6 +3086,15 @@ function getCompactStyles(el, isRoot = false) {
     // Skip all border properties if border is just inheriting text color (causes blue outlines)
     if (prop.startsWith('border-') && prop !== 'border-radius' && !hasMeaningfulBorder) continue;
 
+    // Only emit `border-{side}-*` for sides that actually paint a border.
+    const borderSideMatch = prop.match(/^border-(top|right|bottom|left)-(width|style|color)$/);
+    if (borderSideMatch) {
+      const side = borderSideMatch[1];
+      const sideWidth = parseFloat(computed.getPropertyValue(`border-${side}-width`)) || 0;
+      const sideStyle = computed.getPropertyValue(`border-${side}-style`);
+      if (sideWidth <= 0 || sideStyle === 'none' || sideStyle === 'hidden') continue;
+    }
+
     let value = computed.getPropertyValue(prop);
 
     // Debug: Log backdrop-filter and filter values
@@ -2450,6 +3122,17 @@ function getCompactStyles(el, isRoot = false) {
     }
 
     if (isDefaultValue(prop, value)) continue;
+
+    // Chrome resolves `outline` to "<currentColor> none medium" on every element;
+    // drop when the shorthand has a standalone `none` token (word-boundary so
+    // we don't false-match `none` inside a colour name).
+    if (prop === 'outline' && /(?:^|\s)none(?:\s|$)/.test(value)) continue;
+
+    // Inherited-prop dedup: skip on descendants when parent already provides it.
+    if (!isRoot && parentComputed && INHERITED_PROPS.has(prop)) {
+      const parentVal = parentComputed.getPropertyValue(prop);
+      if (parentVal === value) continue;
+    }
 
     // Shorten colors
     if (prop.includes('color') || prop === 'background-color') {
@@ -2491,9 +3174,9 @@ function getCompactStyles(el, isRoot = false) {
               inline['min-width'] = `${width}px`;
           } else {
               // FLUID STRATEGY: For text elements, use min-width + auto.
-              // This fixes the text overflow issue.
+              // This fixes the text overflow issue. (Matches main.)
               inline['min-width'] = `${width}px`;
-              inline['flex-basis'] = 'auto'; 
+              inline['flex-basis'] = 'auto';
               inline['width'] = 'auto';
           }
       }
@@ -2501,13 +3184,18 @@ function getCompactStyles(el, isRoot = false) {
       // Height Handling
       if (height > 0) {
           if (isMedia || !isFluid) {
-              // STRICT STRATEGY
+              // STRICT: media AND structural divs get an exact height, so the layout
+              // matches the original pixel-for-pixel (equal-height cards, fixed bands,
+              // etc.). Deliberate trade-off: if a font can't be embedded and reflows
+              // taller, its text may overflow the box — the user prefers exact layout
+              // over avoiding the occasional font collision. (Fonts now embed, so this
+              // is rare; see collectUsedFontFamilies / the @font-face embedding path.)
               inline['height'] = `${height}px`;
               inline['min-height'] = `${height}px`;
           } else {
-             // FLUID STRATEGY
-             inline['min-height'] = `${height}px`;
-             inline['height'] = 'auto'; 
+              // FLUID text (h1–h6, p, span, …): min-height + auto so it can wrap.
+              inline['min-height'] = `${height}px`;
+              inline['height'] = 'auto';
           }
       }
   }
@@ -2604,10 +3292,11 @@ function buildStructure(el, isRoot = false) {
 
   const computed = window.getComputedStyle(originalEl);
 
-  // Skip hidden elements
-  if (!isElementVisible(computed)) {
+  // Don't prune the root selection — better a tiny element than an empty export.
+  if (!isRoot && !isElementVisible(computed)) {
     if (hadHover) originalEl.classList.add("web-replica-hover");
     if (hadSelected) originalEl.classList.add("web-replica-selected");
+    if (_exportDiag) _exportDiag.filteredCount++;
     return null;
   }
 
@@ -2693,18 +3382,11 @@ function buildStructure(el, isRoot = false) {
     }
   }
 
-  // Capture ::before and ::after pseudo-element content AND styling (for letter avatars, icons, etc.)
-  // Use originalEl for computed styles since clones aren't in the DOM
-  const beforeStyle = window.getComputedStyle(originalEl, '::before');
-  const afterStyle = window.getComputedStyle(originalEl, '::after');
-  const beforeContent = beforeStyle.getPropertyValue('content');
-  const afterContent = afterStyle.getPropertyValue('content');
+  // ::before / ::after as real CSS rules — except void elements (no pseudos)
+  // and icon fonts (keep glyph as text so existing icon-class plumbing renders).
+  const beforePseudo = tryCapturePseudo(originalEl, 'before');
+  const afterPseudo = tryCapturePseudo(originalEl, 'after');
 
-  // Check if we have visible pseudo-element content
-  let pseudoSource = null;
-  let pseudoContent = '';
-
-  // Check if element uses an icon font (Fluent, Material, Font Awesome, etc.)
   const usesIconFont = node.iconFont ||
     computed.fontFamily.toLowerCase().includes('fluent') ||
     computed.fontFamily.toLowerCase().includes('material') ||
@@ -2713,64 +3395,33 @@ function buildStructure(el, isRoot = false) {
     el.classList?.contains('material-icons') ||
     el.classList?.contains('material-symbols-outlined');
 
-  if (beforeContent && beforeContent !== 'none' && beforeContent !== 'normal') {
-    const clean = beforeContent.replace(/^["']|["']$/g, '');
-    // For icon fonts, capture any content length (icons can use various Unicode points)
-    // For regular elements, limit to short content like letters
-    const maxLength = usesIconFont ? 50 : 5;
-    if (clean && clean.length <= maxLength) {
-      pseudoContent = clean;
-      pseudoSource = beforeStyle;
-    }
-  }
-  if (!pseudoContent && afterContent && afterContent !== 'none' && afterContent !== 'normal') {
-    const clean = afterContent.replace(/^["']|["']$/g, '');
-    const maxLength = usesIconFont ? 50 : 5;
-    if (clean && clean.length <= maxLength) {
-      pseudoContent = clean;
-      pseudoSource = afterStyle;
-    }
-  }
-
-  // Always capture pseudo content for icon fonts, even if element has other text
-  if (pseudoContent) {
-    if (usesIconFont || !textContent) {
-      node.text = pseudoContent;
-      node.fromPseudo = true; // Flag that this came from pseudo-element
-    }
-  }
-
-  // Capture pseudo-element styling (background-color, border-radius, dimensions) for avatar circles
-  if (pseudoSource) {
-    const pseudoBg = pseudoSource.getPropertyValue('background-color');
-    const pseudoRadius = pseudoSource.getPropertyValue('border-radius');
-    const pseudoWidth = pseudoSource.getPropertyValue('width');
-    const pseudoHeight = pseudoSource.getPropertyValue('height');
-    const pseudoColor = pseudoSource.getPropertyValue('color');
-
-    // If pseudo-element has its own background/styling, merge into the element's style
-    if (pseudoBg && pseudoBg !== 'transparent' && pseudoBg !== 'rgba(0, 0, 0, 0)') {
-      // This element uses a pseudo-element for visual styling
-      // Add these styles to the shared style object
+  if (beforePseudo || afterPseudo) {
+    if (VOID_ELEMENT_TAGS.has(tagName)) {
+      const src = beforePseudo || afterPseudo;
+      if (src.content && !textContent) {
+        node.text = src.content;
+        node.fromPseudo = true;
+      }
       if (styleResult && styleResult.shared) {
-        // Only override if not already set or if transparent
-        if (!styleResult.shared['background-color'] || styleResult.shared['background-color'] === 'transparent') {
-          styleResult.shared['background-color'] = rgbToHex(pseudoBg);
+        for (const [prop, val] of Object.entries(src.styles)) {
+          if (!styleResult.shared[prop]) styleResult.shared[prop] = val;
         }
       }
-      node.pseudoBg = rgbToHex(pseudoBg);
-    }
-    if (pseudoRadius && pseudoRadius !== '0px') {
-      node.pseudoRadius = pseudoRadius;
-    }
-    if (pseudoColor) {
-      node.pseudoColor = rgbToHex(pseudoColor);
-    }
-    if (pseudoWidth && pseudoWidth !== 'auto') {
-      node.pseudoWidth = pseudoWidth;
-    }
-    if (pseudoHeight && pseudoHeight !== 'auto') {
-      node.pseudoHeight = pseudoHeight;
+    } else if (usesIconFont && (beforePseudo?.content || afterPseudo?.content)) {
+      const src = (beforePseudo && beforePseudo.content) ? beforePseudo : afterPseudo;
+      if (src.content && !textContent) {
+        node.text = src.content;
+        node.fromPseudo = true;
+      }
+    } else {
+      const bundle = {};
+      if (beforePseudo) bundle.before = beforePseudo;
+      if (afterPseudo) bundle.after = afterPseudo;
+      node.pseudoClass = getOrCreatePseudoClass(bundle);
+      // Letter-avatar pattern: pseudo content stands in for missing text.
+      if (beforePseudo && beforePseudo.content && !textContent && el.children.length === 0) {
+        node.fromPseudo = true;
+      }
     }
   }
 
@@ -2802,11 +3453,10 @@ function buildStructure(el, isRoot = false) {
         const hasChildren = childNode.orderedContent?.length > 0 || childNode.children?.length > 0;
         const hasSvg = childNode.svg;
         const hasImage = childNode.src;
-        const hasPseudoBg = childNode.pseudoBg;
+        const hasDecorativePseudo = childNode.pseudoClass;
 
-        // Skip empty <span> elements with no content - these are typically overlays
-        // But preserve divs, inputs, buttons, and elements with backgrounds
-        const isEmptySpan = childNode.tag === 'span' && !hasText && !hasChildren && !hasSvg && !hasImage && !hasPseudoBg;
+        // Skip empty <span>s (overlay decorations); keep anything with content or a pseudo.
+        const isEmptySpan = childNode.tag === 'span' && !hasText && !hasChildren && !hasSvg && !hasImage && !hasDecorativePseudo;
 
         if (isEmptySpan) {
           continue; // Skip empty decorative spans
@@ -2843,34 +3493,38 @@ function buildStructure(el, isRoot = false) {
   // Capture aria-label for accessibility
   if (el.getAttribute('aria-label')) node.ariaLabel = el.getAttribute('aria-label');
 
-  // Check for icon font usage (Material Icons/Symbols, Font Awesome, etc.)
+  // Check for icon font usage. Match only the PRIMARY (first) font family — an icon
+  // font is always the element's own font (e.g. "Material Symbols Outlined").
+  // Matching anywhere in the stack falsely flagged normal text whose fallback chain
+  // ends in "Segoe UI Symbol"/emoji fonts (all of Notion), rendering text as glyphs.
   const fontFamily = computed.getPropertyValue('font-family').toLowerCase();
-  const isIconFont = fontFamily.includes('material') ||
-                     fontFamily.includes('symbol') ||
-                     fontFamily.includes('icon') ||
-                     fontFamily.includes('fontawesome') ||
-                     fontFamily.includes('fa ') ||
-                     fontFamily.includes('fa-') ||
-                     fontFamily.includes('google material');
+  const primaryFont = (fontFamily.split(',')[0] || '').trim().replace(/["']/g, '');
+  const SYSTEM_SYMBOL_FONTS = ['segoe ui symbol', 'segoe ui emoji', 'apple color emoji', 'noto color emoji', 'noto sans symbols', 'noto sans symbols 2'];
+  const isIconFont = !SYSTEM_SYMBOL_FONTS.includes(primaryFont) && (
+    primaryFont.includes('material icons') ||
+    primaryFont.includes('material symbols') ||
+    primaryFont.includes('google material') ||
+    primaryFont.includes('awesome') ||
+    /\bicon(s|font)?\b/.test(primaryFont) ||
+    primaryFont.includes('symbol')
+  );
 
-  // Also check by class name for icon detection
+  // Icon-font class conventions only (not any class that merely contains "icon").
   const classListStr = el.className && typeof el.className === 'string' ? el.className.toLowerCase() : '';
-  const hasIconClass = classListStr.includes('material') ||
-                       classListStr.includes('icon') ||
-                       classListStr.includes('fa-') ||
-                       classListStr.includes('fa ');
+  const hasIconClass = /\bmaterial-(icons|symbols)\b/.test(classListStr) ||
+                       /\bfa-/.test(classListStr) ||
+                       /\b(fa|fas|far|fab|fal)\b/.test(classListStr);
 
   if ((isIconFont || hasIconClass) && textContent) {
     node.isIcon = true;
-    // Determine which icon font - check for "symbol" specifically
-    if (fontFamily.includes('symbol')) {
+    if (primaryFont.includes('symbol') || /\bmaterial-symbols\b/.test(classListStr)) {
       node.iconFont = 'material-symbols';
-    } else if (fontFamily.includes('material') || fontFamily.includes('google material') || classListStr.includes('material')) {
+    } else if (primaryFont.includes('material') || classListStr.includes('material')) {
       node.iconFont = 'material-icons';
-    } else if (fontFamily.includes('fontawesome') || classListStr.includes('fa')) {
+    } else if (primaryFont.includes('awesome') || /\bfa/.test(classListStr)) {
       node.iconFont = 'fontawesome';
     } else {
-      node.iconFont = fontFamily.split(',')[0].trim().replace(/["']/g, '');
+      node.iconFont = primaryFont;
     }
   }
 
@@ -2925,9 +3579,13 @@ function escapeHtml(str) {
 }
 
 // --- Build HTML from structure ---
-function structureToHtml(node, indent = 0) {
-  const pad = '  '.repeat(indent);
+function structureToHtml(node, indent = 0, preserve = false) {
   const tag = node.tag;
+  // Whitespace-preserving elements (pre/code/textarea, or anything nested inside one)
+  // must NOT be pretty-printed — injected indentation/newlines are rendered as blank
+  // lines and stray background rectangles (e.g. GitHub inline `code`, code blocks).
+  const pre = preserve || tag === 'pre' || tag === 'code' || tag === 'textarea';
+  const pad = pre ? '' : '  '.repeat(indent);
 
   // SVG - output the preserved outerHTML directly
   if (node.svg) {
@@ -2938,6 +3596,7 @@ function structureToHtml(node, indent = 0) {
   let attrs = '';
   let classes = [];
   if (node.style) classes.push(node.style);
+  if (node.pseudoClass) classes.push(node.pseudoClass);
 
   // Add icon font class if needed - this class makes the icon text render as actual icons
   if (node.isIcon && node.iconFont) {
@@ -2955,15 +3614,10 @@ function structureToHtml(node, indent = 0) {
   if (classes.length > 0) {
     attrs += ` class="${classes.join(' ')}"`;
   }
-  // Convert height to min-height in inline styles to allow content expansion
-  // Also add pseudo-element styles for elements with pseudo backgrounds
   let inlineStyleParts = [];
   if (node.inlineStyle) {
     inlineStyleParts.push(node.inlineStyle);
   }
-  // Add pseudo-element styles (for avatar backgrounds etc.)
-  if (node.pseudoBg) inlineStyleParts.push(`background-color: ${node.pseudoBg}`);
-  if (node.pseudoRadius) inlineStyleParts.push(`border-radius: ${node.pseudoRadius}`);
 
   if (inlineStyleParts.length > 0) {
     attrs += ` style="${inlineStyleParts.join('; ')}"`;
@@ -3011,25 +3665,13 @@ function structureToHtml(node, indent = 0) {
       stylesParts.push(node.inlineStyle);
     }
 
-    // Add pseudo-element styles for avatar circles
-    if (node.pseudoBg) stylesParts.push(`background-color: ${node.pseudoBg}`);
-    if (node.pseudoRadius) stylesParts.push(`border-radius: ${node.pseudoRadius}`);
-    if (node.pseudoColor) stylesParts.push(`color: ${node.pseudoColor}`);
-    if (node.pseudoWidth) stylesParts.push(`width: ${node.pseudoWidth}`);
-    if (node.pseudoHeight) stylesParts.push(`height: ${node.pseudoHeight}`);
-    // Center text in avatar circles
-    if (node.fromPseudo && node.pseudoBg) {
-      stylesParts.push('display: flex');
-      stylesParts.push('align-items: center');
-      stylesParts.push('justify-content: center');
-    }
-
     const finalStyle = stylesParts.join('; ');
 
     // Rebuild attrs
     attrs = '';
     let classes = [];
     if (node.style) classes.push(node.style);
+  if (node.pseudoClass) classes.push(node.pseudoClass);
     if (node.isIcon && node.iconFont) {
       if (node.iconFont.includes('symbol')) classes.push('material-symbols-outlined');
       else classes.push('material-icons');
@@ -3045,25 +3687,25 @@ function structureToHtml(node, indent = 0) {
   let html = `${pad}<${tag}${attrs}>`;
 
   if (node.orderedContent && node.orderedContent.length > 0) {
-    html += '\n';
+    if (!pre) html += '\n';
     for (const item of node.orderedContent) {
       if (item.type === 'text') {
-        html += `${pad}  ${item.content}\n`;
+        html += pre ? item.content : `${pad}  ${item.content}\n`;
       } else if (item.type === 'element') {
-        html += structureToHtml(item.node, indent + 1) + '\n';
+        html += pre ? structureToHtml(item.node, 0, true) : structureToHtml(item.node, indent + 1) + '\n';
       }
     }
-    html += pad;
+    if (!pre) html += pad;
   } else if (node.text) {
     // Fallback for simple text nodes
     html += node.text;
   } else if (node.children) {
     // Fallback for old-style children array
-    html += '\n';
+    if (!pre) html += '\n';
     for (const child of node.children) {
-      html += structureToHtml(child, indent + 1) + '\n';
+      html += pre ? structureToHtml(child, 0, true) : structureToHtml(child, indent + 1) + '\n';
     }
-    html += pad;
+    if (!pre) html += pad;
   }
 
   html += `</${tag}>`;
@@ -3163,7 +3805,11 @@ function structureToJsx(node, indent = 0) {
   // Build JSX attributes
   let attrs = '';
   let classes = [];
-  if (node.style) classes.push(node.style);
+  if (node.style) {
+    const tw = _tailwindStyles && _tailwindStyles[node.style];
+    classes.push(tw || node.style);
+  }
+  if (node.pseudoClass) classes.push(node.pseudoClass);
 
   // Icon font class
   if (node.isIcon && node.iconFont) {
@@ -3181,8 +3827,6 @@ function structureToJsx(node, indent = 0) {
   // Build inline style as JSX object
   let inlineStyleParts = [];
   if (node.inlineStyle) inlineStyleParts.push(node.inlineStyle);
-  if (node.pseudoBg) inlineStyleParts.push(`background-color: ${node.pseudoBg}`);
-  if (node.pseudoRadius) inlineStyleParts.push(`border-radius: ${node.pseudoRadius}`);
 
   if (inlineStyleParts.length > 0) {
     const styleObj = cssStringToJsxStyleObj(inlineStyleParts.join('; '));
@@ -3226,22 +3870,16 @@ function structureToJsx(node, indent = 0) {
   if (!node.children && node.text) {
     let stylesParts = [];
     if (node.inlineStyle) stylesParts.push(node.inlineStyle);
-    if (node.pseudoBg) stylesParts.push(`background-color: ${node.pseudoBg}`);
-    if (node.pseudoRadius) stylesParts.push(`border-radius: ${node.pseudoRadius}`);
-    if (node.pseudoColor) stylesParts.push(`color: ${node.pseudoColor}`);
-    if (node.pseudoWidth) stylesParts.push(`width: ${node.pseudoWidth}`);
-    if (node.pseudoHeight) stylesParts.push(`height: ${node.pseudoHeight}`);
-    if (node.fromPseudo && node.pseudoBg) {
-      stylesParts.push('display: flex');
-      stylesParts.push('align-items: center');
-      stylesParts.push('justify-content: center');
-    }
     const finalStyle = stylesParts.join('; ');
 
     // Rebuild attrs for text elements
     attrs = '';
     let textClasses = [];
-    if (node.style) textClasses.push(node.style);
+    if (node.style) {
+      const tw = _tailwindStyles && _tailwindStyles[node.style];
+      textClasses.push(tw || node.style);
+    }
+    if (node.pseudoClass) textClasses.push(node.pseudoClass);
     if (node.isIcon && node.iconFont) {
       if (node.iconFont.includes('symbol')) textClasses.push('material-symbols-outlined');
       else textClasses.push('material-icons');
@@ -3304,36 +3942,122 @@ async function buildExport() {
   });
   if (!selectedElements.size) return null;
 
+  // Tell the dock an export just started so it can show the loader immediately —
+  // covers EVERY trigger (dock button, ⌘⇧E keyboard, command). The dock hides it
+  // when the result renders. Callback swallows "no receiver" when the dock is closed.
+  try { chrome.runtime.sendMessage({ type: 'EXPORT_STARTED' }, () => void chrome.runtime.lastError); } catch (e) {}
+
   resetStyleRegistry();
   cloneToOriginal = new Map();
+  _tailwindStyles = null;
+
+  _exportDiag = {
+    selectionCount: 0,
+    groupCount: 0,
+    wrapperCount: 0,
+    filteredCount: 0,
+    selections: [],
+    styleCount: 0,
+    pseudoStyleCount: 0,
+    hoverStyleCount: 0,
+  };
 
   const topLevel = getTopLevelSelections();
+  _exportDiag.selectionCount = topLevel.length;
 
-  // USE SELECTION-TIME CLONES: These were captured when user clicked, freezing dynamic content
-  // This ensures rotating content (like GitHub ProTips) shows what user saw at selection time
-  const clones = topLevel.map(el => {
-    // Use the clone captured at selection time, or fall back to cloning now
-    const clone = selectionClones.get(el) || el.cloneNode(true);
-    // Build mapping from clone nodes to original nodes for style computation
-    buildCloneMapping(el, clone, cloneToOriginal);
-    return clone;
-  });
+  // Group selections by layout parent so siblings keep their flex/grid context.
+  const groups = new Map();
+  for (const el of topLevel) {
+    const layoutParent = getLayoutParent(el);
+    const useWrapper = layoutParent &&
+      layoutParent !== document.body &&
+      layoutParent !== document.documentElement;
+    const key = useWrapper ? layoutParent : null;
+    if (!groups.has(key)) {
+      groups.set(key, { parent: useWrapper ? layoutParent : null, originals: [] });
+    }
+    groups.get(key).originals.push(el);
+  }
+  _exportDiag.groupCount = groups.size;
 
   const structures = [];
 
-  // Process CLONES (text is frozen from selection time), but use originals for computed styles
-  for (const clone of clones) {
-    const structure = buildStructure(clone, true);
-    if (structure) {
-      structures.push(structure);
+  for (const { parent, originals } of groups.values()) {
+    const built = [];
+    let hasPositioned = false;
+
+    for (const original of originals) {
+      // ponytail: clone FRESH at export, not the selection-time clone. A stale clone
+      // can structurally diverge from the live DOM (apps like Notion re-render between
+      // select and export); buildCloneMapping pairs clone↔original by index, so a
+      // mismatch fell back to the detached clone — whose getComputedStyle returns
+      // INITIAL values (display:block, gap:normal), collapsing flex rows into vertical
+      // stacks and killing gaps. A fresh clone always matches the current original, so
+      // every node reads styles from its real (attached) element. Trade-off: content is
+      // frozen at export time instead of selection time (fine, and more predictable).
+      const clone = original.cloneNode(true);
+      buildCloneMapping(original, clone, cloneToOriginal);
+
+      const structure = buildStructure(clone, true);
+
+      const rect = original.getBoundingClientRect();
+      const className = (typeof original.className === 'string')
+        ? original.className.split(/\s+/).filter(c => c && !c.startsWith('web-replica-')).slice(0, 3).join(' ').slice(0, 60)
+        : '';
+      _exportDiag.selections.push({
+        tag: original.tagName.toLowerCase(),
+        className,
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        w: Math.round(rect.width),
+        h: Math.round(rect.height),
+        wrapped: !!parent,
+        kept: !!structure,
+      });
+
+      if (!structure) continue;
+
+      const ocs = window.getComputedStyle(original);
+      if (ocs.position === 'absolute' || ocs.position === 'fixed') hasPositioned = true;
+      built.push({ structure, original });
+    }
+
+    if (built.length === 0) continue;
+
+    if (parent) {
+      const parentStyles = captureLayoutParentStyles(parent, hasPositioned);
+      const childNodes = built.map(({ structure }) => structure);
+      const wrapper = {
+        tag: 'div',
+        style: Object.keys(parentStyles).length > 0 ? getOrCreateStyleName(parentStyles) : undefined,
+        children: childNodes,
+        orderedContent: childNodes.map(node => ({ type: 'element', node })),
+      };
+      structures.push(wrapper);
+      _exportDiag.wrapperCount++;
+    } else {
+      // No parent context — normalize orphan abs/fixed so offsets don't resolve against <body>.
+      for (const { structure, original } of built) {
+        const ocs = window.getComputedStyle(original);
+        if (ocs.position === 'absolute' || ocs.position === 'fixed') {
+          const overrides = 'position: relative; top: auto; right: auto; bottom: auto; left: auto';
+          structure.inlineStyle = structure.inlineStyle
+            ? `${structure.inlineStyle}; ${overrides}`
+            : overrides;
+        }
+        structures.push(structure);
+      }
     }
   }
 
   // Build styles object from registry (as CSS strings for compactness)
   const styles = {};
+  const tailwindMode = isTailwindPage();
+  _tailwindStyles = tailwindMode ? {} : null;
   styleRegistry.forEach((name, styleJson) => {
     const styleObj = JSON.parse(styleJson);
     styles[name] = styleObjToCss(styleObj);
+    if (_tailwindStyles) _tailwindStyles[name] = styleObjToTailwind(styleObj);
   });
 
   // Build hover styles object
@@ -3353,6 +4077,7 @@ async function buildExport() {
     // Tag with style class
     toon += node.tag;
     if (node.style) toon += `.${node.style}`;
+    if (node.pseudoClass) toon += `.${node.pseudoClass}`;
     if (node.inlineStyle) toon += `[${node.inlineStyle}]`;
 
     // Attributes on same line
@@ -3405,6 +4130,24 @@ async function buildExport() {
     }
   }
 
+  if (pseudoStyleRegistry.size > 0) {
+    toon += `\n## Pseudo Styles\n`;
+    pseudoStyleRegistry.forEach(({ className, bundle }) => {
+      if (bundle.before) {
+        const body = Object.keys(bundle.before.styles).length
+          ? '; ' + styleObjToCss(bundle.before.styles)
+          : '';
+        toon += `.${className}::before: content:'${bundle.before.content}'${body}\n`;
+      }
+      if (bundle.after) {
+        const body = Object.keys(bundle.after.styles).length
+          ? '; ' + styleObjToCss(bundle.after.styles)
+          : '';
+        toon += `.${className}::after: content:'${bundle.after.content}'${body}\n`;
+      }
+    });
+  }
+
   toon += `\n## Structure\n`;
   if (Array.isArray(structure)) {
     for (const s of structure) {
@@ -3445,6 +4188,20 @@ async function buildExport() {
   for (const [name, cssString] of Object.entries(hoverStyles)) {
     css += `.${name}:hover { ${sanitizeCss(cssString)}; }\n`;
   }
+  pseudoStyleRegistry.forEach(({ className, bundle }) => {
+    if (bundle.before) {
+      const body = Object.keys(bundle.before.styles).length
+        ? `${sanitizeCss(styleObjToCss(bundle.before.styles))}; `
+        : '';
+      css += `.${className}::before { content: '${escapePseudoContent(bundle.before.content)}'; ${body}}\n`;
+    }
+    if (bundle.after) {
+      const body = Object.keys(bundle.after.styles).length
+        ? `${sanitizeCss(styleObjToCss(bundle.after.styles))}; `
+        : '';
+      css += `.${className}::after { content: '${escapePseudoContent(bundle.after.content)}'; ${body}}\n`;
+    }
+  });
 
   const bodyHtml = Array.isArray(structure)
     ? structure.map(s => structureToHtml(s)).join('\n\n')
@@ -3494,6 +4251,7 @@ async function buildExport() {
 
   // Extract and embed custom WOFF/WOFF2 fonts
   let embeddedFontCSS = '';
+  const exportFontFaces = []; // Surfaced to preview for the Download Fonts button.
   try {
     console.log('[Pluck] Extracting @font-face rules...');
     const allFontFaces = await extractFontFaces();
@@ -3515,14 +4273,26 @@ async function buildExport() {
       const usedFonts = filterUsedFonts(allFontFaces, usedFontFamilies);
       console.log('[Pluck] Fonts to embed:', usedFonts.size);
 
-      // Fetch and convert fonts to base64
-      for (const [key, font] of usedFonts) {
+      // Fetch and convert fonts to base64 — in PARALLEL. Serial awaits made total
+      // time the SUM of every font's latency; concurrent makes it the slowest one
+      // (each already bounded by bgFetch's timeout).
+      await Promise.all(Array.from(usedFonts.values()).map(async (font) => {
         console.log('[Pluck] Fetching font:', font.family, font.url);
         font.dataUrl = await fetchFontAsBase64(font.url);
         if (font.dataUrl) {
           console.log('[Pluck] Successfully embedded:', font.family);
+          // Strip `data:<mime>;base64,` so the preview can decode raw bytes.
+          const base64 = font.dataUrl.split(',')[1] || '';
+          exportFontFaces.push({
+            family: font.family,
+            weight: String(font.weight || '400'),
+            style: String(font.style || 'normal'),
+            format: font.format,
+            base64,
+            ok: !!base64,
+          });
         }
-      }
+      }));
 
       // Generate @font-face CSS
       embeddedFontCSS = generateFontFaceCSS(usedFonts);
@@ -3530,6 +4300,7 @@ async function buildExport() {
   } catch (e) {
     console.warn('[Pluck] Font embedding error:', e.message);
   }
+  if (_exportDiag) _exportDiag.bundledFontCount = exportFontFaces.filter(f => f.ok).length;
 
   // Check if any styles use backdrop-filter (need background to show effect)
   const hasBackdropFilter = css.includes('backdrop-filter');
@@ -3603,7 +4374,20 @@ ${bodyHtml}
     ? structure.map(s => structureToJsx(s, 3)).join('\n\n')
     : structureToJsx(structure, 3);
 
-  const jsxComponent = `import React from 'react';
+  const jsxComponent = tailwindMode
+    ? `// Tailwind classes — source page detected as Tailwind-built.
+import React from 'react';
+
+const Component = () => {
+  return (
+    <>
+${jsxBody}
+    </>
+  );
+};
+
+export default Component;`
+    : `import React from 'react';
 import './Component.css';
 
 const Component = () => {
@@ -3623,11 +4407,55 @@ export default Component;`;
   const finalHtml = typeof beautifyHtml === 'function' ? beautifyHtml(html) : html;
   const finalJsx = typeof beautifyJsx === 'function' ? beautifyJsx(jsxComponent) : jsxComponent;
 
+  // Diagnostics are best-effort and must NEVER abort the export. On slow-font pages
+  // (e.g. AWS, where many @font-face URLs 404 during the awaits above) two exports can
+  // overlap and one nulls the shared _exportDiag — plus a malformed style could throw.
+  // Use a local fallback object and swallow any error so the export always returns.
+  const diag = _exportDiag || {};
+  try {
+    diag.styleCount = styleRegistry.size;
+    diag.pseudoStyleCount = pseudoStyleRegistry.size;
+    diag.hoverStyleCount = hoverStyleRegistry.size;
+    diag.tailwindMode = tailwindMode;
+
+    const fontCounts = new Map();
+    styleRegistry.forEach((_name, styleJson) => {
+      try {
+        const obj = JSON.parse(styleJson);
+        if (obj['font-family']) {
+          const first = obj['font-family'].split(',')[0].trim().replace(/["']/g, '');
+          const lo = first.toLowerCase();
+          if (['sans-serif', 'serif', 'monospace', 'cursive', 'fantasy',
+               '-apple-system', 'blinkmacsystemfont', 'system-ui',
+               'inherit', 'initial'].includes(lo)) return;
+          if (lo.includes('icon') || lo.includes('material') || lo.includes('fontawesome')) return;
+          fontCounts.set(first, (fontCounts.get(first) || 0) + 1);
+        }
+      } catch (e) {}
+    });
+    let primaryFont = null;
+    let primaryFontCount = 0;
+    fontCounts.forEach((count, font) => {
+      if (count > primaryFontCount) { primaryFont = font; primaryFontCount = count; }
+    });
+    diag.primaryFont = primaryFont;
+    diag.primaryFontWillLoad = primaryFont
+      ? Array.from(getDetectedFonts()).some(f => f.toLowerCase() === primaryFont.toLowerCase())
+      : false;
+  } catch (e) {
+    console.warn('[Pluck] diagnostics failed (non-fatal):', e && e.message);
+  }
+
+  const diagnostics = diag;
+  _exportDiag = null;
+
   return {
     toon,  // TOON format for LLMs (more token-efficient)
     html: finalHtml,
     jsx: finalJsx,
-    css: cssModule
+    css: cssModule,
+    diagnostics,
+    fontFaces: exportFontFaces,
   };
 }
 
@@ -3675,10 +4503,10 @@ window.addEventListener('message', async (event) => {
   let result = null;
 
   if (msg.type === "START_PICK_MODE") {
-    pickMode = true;
+    pickMode = true; applyPickCursor();
     result = { ok: true };
   } else if (msg.type === "STOP_PICK_MODE") {
-    pickMode = false;
+    pickMode = false; applyPickCursor();
     if (hoverElement) {
       hoverElement.classList.remove("web-replica-hover");
       hoverElement = null;
@@ -3688,7 +4516,7 @@ window.addEventListener('message', async (event) => {
     selectedElements.forEach((el) => el.classList.remove("web-replica-selected"));
     selectedElements.clear();
     selectionClones.clear();
-    pickMode = false;
+    pickMode = false; applyPickCursor();
     result = { ok: true };
   } else if (msg.type === "EXPORT_SELECTION") {
     result = await buildExport();
@@ -3704,14 +4532,14 @@ window.addEventListener('message', async (event) => {
 // Wrap in try-catch to handle extension context invalidation gracefully
 try {
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "CHECK_INJECTED") {
     sendResponse({ injected: true });
     return true;
   }
 
   if (msg.type === "START_PICK_MODE") {
-    pickMode = true;
+    pickMode = true; applyPickCursor();
     if (hoverElement) {
       hoverElement.classList.remove("web-replica-hover");
       hoverElement = null;
@@ -3733,7 +4561,7 @@ try {
   }
 
   if (msg.type === "STOP_PICK_MODE") {
-    pickMode = false;
+    pickMode = false; applyPickCursor();
     if (hoverElement) {
       hoverElement.classList.remove("web-replica-hover");
       hoverElement = null;
@@ -3746,6 +4574,15 @@ try {
     broadcastToFrames(msg);
 
     sendResponse({ ok: true, pickMode: false });
+    return true;
+  }
+
+  if (msg.type === "TOGGLE_PICK_MODE") {
+    pickMode = !pickMode; applyPickCursor();
+    if (hoverElement) { hoverElement.classList.remove("web-replica-hover"); hoverElement = null; }
+    showModeIndicator(pickMode ? 'Selection mode ON' : 'Selection mode OFF');
+    broadcastToFrames({ type: pickMode ? 'START_PICK_MODE' : 'STOP_PICK_MODE' });
+    sendResponse({ ok: true, pickMode });
     return true;
   }
 
@@ -3824,11 +4661,13 @@ try {
     );
     selectedElements.clear();
     selectionClones.clear();
-    pickMode = false;
+    document.querySelectorAll(".web-replica-selected").forEach((el) => el.classList.remove("web-replica-selected"));
+    pickMode = false; applyPickCursor();
     if (hoverElement) {
       hoverElement.classList.remove("web-replica-hover");
       hoverElement = null;
     }
+    document.querySelectorAll(".web-replica-hover").forEach((el) => el.classList.remove("web-replica-hover"));
 
     // Also broadcast to iframes
     broadcastToFrames(msg);
@@ -3868,3 +4707,102 @@ try {
 } catch (e) {
   console.log('[Pluck] Could not add message listener:', e.message);
 }
+
+// ===== Reopen pill: shown on the page while the dock is minimized =====
+(function () {
+  const PILL_ID = '__pluck_reopen_pill';
+  function removePill() { const p = document.getElementById(PILL_ID); if (p) p.remove(); }
+  function showPill() {
+    if (!document.body || document.getElementById(PILL_ID)) return;
+    const pill = document.createElement('div');
+    pill.id = PILL_ID;
+    pill.title = 'Open Pluck dock';
+    pill.setAttribute('style', [
+      'position:fixed', 'right:18px', 'bottom:18px', 'z-index:2147483647',
+      'width:46px', 'height:46px', 'border-radius:50%', 'cursor:pointer',
+      'background:#161618', 'border:1px solid #2a2a2e', 'box-shadow:0 6px 22px rgba(0,0,0,0.45)',
+      'display:flex', 'align-items:center', 'justify-content:center', 'color:#93a8ff',
+      'transition:transform .14s ease'
+    ].join(';'));
+    pill.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3.2M12 18.8V22M2 12h3.2M18.8 12H22"/></svg>';
+    pill.addEventListener('mouseenter', () => { pill.style.transform = 'scale(1.08)'; });
+    pill.addEventListener('mouseleave', () => { pill.style.transform = 'scale(1)'; });
+    pill.addEventListener('click', () => {
+      try { chrome.runtime.sendMessage({ type: 'OPEN_DOCK' }); } catch (e) {}
+      try { chrome.storage.local.set({ pluckMinimized: false }); } catch (e) {}
+      removePill();
+    });
+    document.body.appendChild(pill);
+  }
+  try {
+    chrome.storage.local.get('pluckMinimized', (r) => { if (r && r.pluckMinimized) showPill(); });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes.pluckMinimized) return;
+      if (changes.pluckMinimized.newValue) showPill(); else removePill();
+    });
+  } catch (e) {}
+})();
+
+// ===== Automation hooks =====
+// When this file is injected into a Playwright page (main world), these let an
+// external runner extract by selector and map a page. Harmless in the extension.
+(function () {
+  function __pluckCssPath(el) {
+    if (!el || el.nodeType !== 1) return '';
+    if (el.id) return '#' + (window.CSS && CSS.escape ? CSS.escape(el.id) : el.id);
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.body && parts.length < 6) {
+      let sel = node.tagName.toLowerCase();
+      if (node.id) { parts.unshift('#' + (window.CSS && CSS.escape ? CSS.escape(node.id) : node.id)); break; }
+      const parent = node.parentNode;
+      if (parent && parent.children) {
+        const sibs = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+        if (sibs.length > 1) sel += `:nth-of-type(${sibs.indexOf(node) + 1})`;
+      }
+      parts.unshift(sel);
+      node = node.parentNode;
+    }
+    return parts.join(' > ');
+  }
+  window.__pluckCssPath = __pluckCssPath;
+
+  window.__pluckExtract = async function (selector) {
+    try {
+      selectedElements.forEach((el) => el.classList.remove('web-replica-selected'));
+      selectedElements.clear(); selectionClones.clear();
+      const els = selector ? Array.from(document.querySelectorAll(selector)) : (document.body ? [document.body] : []);
+      if (!els.length) return { error: 'No element matched selector: ' + selector };
+      els.forEach((el) => toggleElement(el, true));
+      const result = await buildExport();
+      selectedElements.forEach((el) => el.classList.remove('web-replica-selected'));
+      selectedElements.clear(); selectionClones.clear();
+      return result || { error: 'Extraction produced no output' };
+    } catch (e) {
+      return { error: String((e && e.message) || e) };
+    }
+  };
+
+  window.__pluckMap = function (max) {
+    max = max || 30;
+    const seen = new Set(); const out = [];
+    const push = (el) => {
+      if (!el || el.nodeType !== 1 || seen.has(el)) return;
+      const r = el.getBoundingClientRect();
+      if (r.width < 40 || r.height < 24) return;
+      seen.add(el);
+      const cn = (el.className && typeof el.className === 'string') ? el.className.trim().split(/\s+/).slice(0, 4).join(' ') : '';
+      out.push({
+        selector: __pluckCssPath(el), tag: el.tagName.toLowerCase(), classes: cn,
+        role: el.getAttribute('role') || '', testid: el.getAttribute('data-testid') || '',
+        w: Math.round(r.width), h: Math.round(r.height),
+        x: Math.round(r.left), y: Math.round(r.top + window.scrollY),
+        text: (el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 80),
+      });
+    };
+    document.querySelectorAll('header,nav,main,footer,aside,section,article,[role],[data-testid]').forEach(push);
+    [document.querySelector('main'), document.body].filter(Boolean).forEach((root) => Array.from(root.children).forEach(push));
+    out.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+    return out.slice(0, max);
+  };
+})();

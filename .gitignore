@@ -1,0 +1,5 @@
+node_modules/
+mcp/node_modules/
+*.log
+.DS_Store
+PR_BODY.md

@@ -17,6 +17,16 @@ Pluck is a Chrome browser extension that lets you select any UI component from a
 - **Live Code Editor** - Edit extracted code in-browser with real-time syntax highlighting (Prism-Live)
 - **Dynamic Live Preview** - Live HTML render that auto-adjusts orientation based on content aspect ratio
 - **Tailwind CSS Detection** - Automatically detects and flags Tailwind utility classes in extracted components
+- **Tailwind JSX Output** - When the source page is Tailwind-built, JSX exports use real utility classes (`flex items-center gap-3 rounded-lg`) instead of deduped CSS class references, with arbitrary-value fallbacks (`gap-[13px]`) for unmatched values
+- **Smart Container Expansion** - Clicks on small leaves (inputs, icons, headings) auto-expand to the nearest visually-distinct or structural ancestor; `⌥`/`Alt + Click` bypasses for exact targeting
+- **DOM Navigation** - `⌥`/`Alt + ↑/↓` walks the parent/child chain with a back-stack so over-navigating up doesn't strand you at `<body>`
+- **Full-Page Extract** - One shortcut (`Cmd/Ctrl+Shift+F`) selects `<body>` and exports the whole page
+- **Full Pseudo-Element Capture** - Both `::before` and `::after` captured independently as real CSS rules (decorative pseudos with empty content included)
+- **Parent-Context Wrapper** - When inner elements are selected, their flex/grid container's layout (display, gap, padding, named grid areas) is wrapped around the selection so it still flows correctly
+- **Position Normalization** - `position: absolute|fixed` selections with no positioned ancestor get their offsets cleared, so they don't render relative to `<body>`
+- **Style-Noise Filtering** - Drops runaway min-locks, user-agent borders, outline noise, and inherited duplicates
+- **Diagnostics Panel** - Collapsible panel above the preview tabs shows top-level selections captured, nodes dropped by the visibility filter, registry sizes, per-selection bounding boxes, and primary-font fallback warnings
+- **Download Fonts as Zip** - Bundles every embedded `@font-face` binary into a single zip you can save next to the exported HTML
 - **HTML Beautification** - Exported HTML is auto-formatted with proper indentation
 - **Live Element Preview in Popup** - Real-time visual preview and code snippet of hovered/selected elements right in the extension popup
 - **Hover State Extraction** - Captures `:hover` CSS pseudo-class styles along with base styles
@@ -134,8 +144,13 @@ Click **Edit** to enter edit mode powered by [Prism-Live](https://live.prismjs.c
 | Toggle Selection | `Cmd + Shift + S` | `Ctrl + Shift + S` | Press again to stop |
 | Clear Selection | `Escape` | `Escape` | Clears all selected elements |
 | Export | `Cmd + Shift + E` | `Ctrl + Shift + E` | Opens Code Preview Page |
+| Extract Full Page | `Cmd + Shift + F` | `Ctrl + Shift + F` | Selects `<body>` and exports immediately |
 | X-Ray Mode | `Cmd + Shift + X` | `Ctrl + Shift + X` | Toggle element inspector |
 | Color Picker | `Cmd + Shift + P` | `Ctrl + Shift + P` | Pick any color from screen |
+| Navigate Parent | `⌥ + ↑` (Option) | `Alt + ↑` | Walks to the parent of the hovered element |
+| Navigate Child / Back | `⌥ + ↓` (Option) | `Alt + ↓` | First child, or back-stack pop if available |
+| Exact Target | `⌥ + Click` (Option) | `Alt + Click` | Bypasses smart container expansion |
+| Multi-Select | `Shift + Click` | `Shift + Click` | Add more elements to the selection |
 
 ### Code Preview Page Shortcuts
 

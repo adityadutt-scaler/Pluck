@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Pluck</title>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+  <link rel="stylesheet" href="lib/prism.css">
+  <link rel="stylesheet" href="lib/prism-live.css">
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="hdr">
+    <div class="hdr-logo"><span class="material-symbols-outlined">touch_app</span></div>
+    <span class="hdr-title">Pluck</span>
+    <span class="hdr-by">by Scaler</span>
+    <span class="hdr-spacer"></span>
+    <button class="icon-btn" id="btn-popout" title="Open code + preview side by side in a new tab"><span class="material-symbols-outlined">open_in_new</span></button>
+    <button class="icon-btn" id="btn-theme" title="Toggle theme"><span class="material-symbols-outlined">dark_mode</span></button>
+    <button class="icon-btn" id="btn-minimize" title="Minimize to a corner pill"><span class="material-symbols-outlined">minimize</span></button>
+    <button class="icon-btn" id="btn-settings" title="Settings"><span class="material-symbols-outlined">settings</span></button>
+  </div>
+
+  <!-- Control bar -->
+  <div class="controls" id="controls">
+    <button class="btn btn-primary btn-block" id="btn-select">
+      <span class="material-symbols-outlined">point_scan</span>
+      <span id="select-label">Start Selecting</span>
+    </button>
+    <div class="ctl-grid">
+      <button class="btn btn-primary ctl-export" id="btn-export" title="Export selection — auto-copies TOON"><span class="material-symbols-outlined">bolt</span>Export</button>
+      <button class="btn ctl-util" id="btn-xray" title="X-Ray inspector"><span class="material-symbols-outlined">layers</span></button>
+      <button class="btn ctl-util" id="btn-colorpick" title="Color picker"><span class="material-symbols-outlined">colorize</span></button>
+      <button class="btn ctl-util" id="btn-clear" title="Clear selection"><span class="material-symbols-outlined">delete_sweep</span></button>
+    </div>
+    <div class="status-row">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status">Ready to select</span>
+      <span class="sel-count hidden" id="sel-count"></span>
+    </div>
+  </div>
+
+  <!-- Live element preview (during selection) -->
+  <div class="elprev" id="elprev">
+    <div class="elprev-head">
+      <span class="elprev-tag" id="elprev-tag"></span>
+      <span class="elprev-dims" id="elprev-dims"></span>
+    </div>
+    <div class="elprev-render" id="elprev-render"></div>
+    <div class="elprev-code" id="elprev-code"></div>
+  </div>
+
+  <!-- Result area -->
+  <div class="result empty" id="result">
+    <div class="empty-state">
+      <span class="material-symbols-outlined">frame_inspect</span>
+      <p><strong>Start Selecting</strong>, click elements on the page, then <strong>Export</strong>. The code lands here and TOON is auto-copied for AI.</p>
+      <div class="kbd-hints" id="kbd-hints"></div>
+    </div>
+
+    <!-- tabbed result: Preview | Code -->
+    <div class="res-only res-view" id="res-view">
+      <div class="view-tabs">
+        <button class="view-tab active" data-view="preview"><span class="material-symbols-outlined">visibility</span>Preview</button>
+        <button class="view-tab" data-view="code"><span class="material-symbols-outlined">code</span>Code</button>
+        <span style="flex:1"></span>
+        <button class="icon-btn" id="btn-flip" title="Toggle fit / actual size"><span class="material-symbols-outlined">fit_screen</span></button>
+      </div>
+
+      <!-- PREVIEW pane -->
+      <div class="pane pane-preview" id="pane-preview">
+        <div class="render-body" id="render-body">
+          <iframe id="render-iframe" sandbox="allow-same-origin" title="Live preview"></iframe>
+          <div class="render-empty" id="render-empty"><span class="material-symbols-outlined">web</span>No preview</div>
+        </div>
+        <div class="history empty" id="history">
+          <div class="history-head">
+            <h3>Recent grabs</h3>
+            <button class="history-clear" id="history-clear">Clear</button>
+          </div>
+          <div class="history-strip" id="history-strip"></div>
+        </div>
+        <div class="preview-foot">
+          <span id="preview-foot-text">TOON is on your clipboard — paste into Claude.</span>
+          <button class="btn btn-primary" id="btn-copy-ai-pv" title="Copy TOON wrapped in an AI prompt"><span class="material-symbols-outlined">smart_toy</span>Copy for AI</button>
+        </div>
+      </div>
+
+      <!-- CODE pane -->
+      <div class="pane pane-code hidden" id="pane-code">
+        <div class="res-bar">
+          <input type="text" class="filename-input" id="filename" placeholder="component" value="component">
+          <button class="btn" id="btn-download-current" title="Download current format (Ctrl+S)"><span class="material-symbols-outlined">download</span></button>
+          <button class="btn" id="btn-download-fonts" title="Download bundled fonts (zip)" hidden><span class="material-symbols-outlined">font_download</span></button>
+          <button class="btn btn-primary" id="btn-download-all" title="Download all (Ctrl+Shift+S)"><span class="material-symbols-outlined">folder_zip</span></button>
+        </div>
+        <div class="tabs">
+          <button class="tab-btn" data-tab="html"><span>HTML</span><span class="tab-tok" id="tok-html"></span></button>
+          <button class="tab-btn" data-tab="jsx"><span>JSX</span><span class="tab-tok" id="tok-jsx"></span></button>
+          <button class="tab-btn" data-tab="css"><span>CSS</span><span class="tab-tok" id="tok-css"></span></button>
+          <button class="tab-btn active" data-tab="toon"><span>TOON</span><span class="tab-tok" id="tok-toon"></span></button>
+        </div>
+        <div class="actions">
+          <button class="btn" id="btn-copy" title="Copy current format (Ctrl+C)"><span class="material-symbols-outlined">content_copy</span>Copy</button>
+          <div class="split-btn">
+            <button class="btn btn-primary" id="btn-copy-ai" title="Copy TOON wrapped in an AI prompt"><span class="material-symbols-outlined">smart_toy</span>Copy for AI</button>
+            <button class="split-caret" id="btn-ai-caret" title="Choose prompt"><span class="material-symbols-outlined">expand_more</span></button>
+            <div class="ai-menu" id="ai-menu"></div>
+          </div>
+          <button class="btn" id="btn-edit" title="Edit (Ctrl+E)"><span class="material-symbols-outlined">edit</span></button>
+        </div>
+        <div class="code-wrap" id="code-wrap">
+          <pre id="code-pre" class="language-html"><code id="code-output" class="language-html"></code></pre>
+          <textarea id="code-editor" class="prism-live language-html" spellcheck="false" style="display:none;"></textarea>
+        </div>
+
+        <!-- diagnostics live under the code -->
+        <div class="diag-wrap">
+          <details class="diag" id="diag" hidden>
+            <summary id="diag-summary"></summary>
+            <div class="diag-body" id="diag-body"></div>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <!-- Export loader (overlays the result area while extracting) -->
+    <div class="export-loader" id="export-loader" aria-hidden="true">
+      <div class="pluck-orb">
+        <span class="orb-ring"></span>
+        <span class="orb-ring"></span>
+        <span class="orb-core"><span class="material-symbols-outlined">point_scan</span></span>
+      </div>
+      <div class="loader-copy">
+        <div class="loader-title" id="loader-title">Extracting component</div>
+        <div class="loader-sub">Reading styles, fonts &amp; layout…</div>
+      </div>
+      <div class="loader-bar"><span></span></div>
+    </div>
+  </div>
+
+  <!-- Settings overlay -->
+  <div class="settings" id="settings">
+    <div class="settings-head">
+      <button class="icon-btn" id="btn-settings-back"><span class="material-symbols-outlined">arrow_back</span></button>
+      <h2>Settings</h2>
+    </div>
+    <div class="settings-body">
+      <div class="set-group">
+        <h4>Auto-copy on export</h4>
+        <div class="set-row">
+          <label for="set-autocopy">Copy this format automatically</label>
+          <select class="set-select" id="set-autocopy">
+            <option value="toon">TOON</option>
+            <option value="html">HTML</option>
+            <option value="jsx">JSX</option>
+            <option value="css">CSS</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
+        <p class="set-hint">After every export the chosen format lands on your clipboard, ready to paste.</p>
+      </div>
+
+      <div class="set-group">
+        <h4>“Copy for AI” prompt</h4>
+        <div class="set-row">
+          <label for="set-aipreset">Default prompt</label>
+          <select class="set-select" id="set-aipreset">
+            <option value="react-tailwind">React + Tailwind</option>
+            <option value="react-css">React + CSS</option>
+            <option value="vue">Vue 3 SFC</option>
+            <option value="html">Responsive HTML/CSS</option>
+            <option value="raw">Raw TOON (no prompt)</option>
+          </select>
+        </div>
+        <p class="set-hint">“Copy for AI” copies the TOON wrapped in this instruction — paste straight into Claude/GPT.</p>
+      </div>
+
+      <div class="set-group">
+        <h4>Appearance</h4>
+        <div class="set-row">
+          <label for="set-theme">Theme</label>
+          <select class="set-select" id="set-theme">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <h4>Keyboard shortcuts</h4>
+        <p class="set-hint" style="margin-bottom:10px;">Work on the page while selecting. Click a modifier to toggle, click the key box and press a key.</p>
+        <div class="sc-row" data-sc="startSelect"><span class="sc-label">Select</span><div class="sc-mods"></div><input class="sc-key" readonly></div>
+        <div class="sc-row" data-sc="clearSelect"><span class="sc-label">Clear</span><div class="sc-mods"></div><input class="sc-key" readonly></div>
+        <div class="sc-row" data-sc="export"><span class="sc-label">Export</span><div class="sc-mods"></div><input class="sc-key" readonly></div>
+        <div class="sc-row" data-sc="xray"><span class="sc-label">X-Ray</span><div class="sc-mods"></div><input class="sc-key" readonly></div>
+        <div class="sc-row" data-sc="colorPick"><span class="sc-label">Color</span><div class="sc-mods"></div><input class="sc-key" readonly></div>
+        <div class="set-actions">
+          <button class="btn btn-primary" id="btn-save-sc">Save shortcuts</button>
+          <button class="btn" id="btn-reset-sc">Reset</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span id="toast-text"></span>
+  </div>
+
+  <script src="lib/bliss.js"></script>
+  <script src="lib/prism.js"></script>
+  <script src="lib/prism-live.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>
