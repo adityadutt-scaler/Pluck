@@ -2,7 +2,7 @@
 
 **Extract any UI component from the web and make it yours.**
 
-Pluck is a Chrome browser extension that lets you select any UI component from any webpage, extract it with all its styles, and export it as standalone HTML, JSX, CSS, or in a token-optimized format perfect for AI/LLM consumption. Includes a full-featured code preview page with live editing, syntax highlighting, and a dynamic live preview.
+Pluck is a Chrome browser extension that lets you select any UI component from any webpage, extract it with all its styles, and export it as standalone HTML, JSX, CSS, or in a token-optimized format perfect for AI/LLM consumption. Everything happens in a **side-panel dock** pinned to the page: select a component and its code lands on your clipboard automatically, ready to paste into an LLM — with a tabbed **Preview | Code** workspace, live token counts, and ready-made "Copy for AI" prompts.
 
 ## Features
 
@@ -13,7 +13,12 @@ Pluck is a Chrome browser extension that lets you select any UI component from a
 - **JSX Export** - Convert extracted components to JSX with `className` attributes
 - **CSS Export** - Extracted and deduplicated CSS styles
 - **TOON Format Export** - Token-Optimized Object Notation for AI/LLM workflows
-- **Code Preview Page** - Dedicated preview page with syntax highlighting, live code editing, and dynamic live preview
+- **Side-Panel Dock** - A persistent panel pinned to the page — select, preview, and grab code without ever leaving the site. Minimize it to a corner pill, or pop it out side-by-side.
+- **Auto-Copy on Export** - The instant you export, your chosen format is already on your clipboard (TOON by default — or HTML/JSX/CSS, or off)
+- **Copy for AI** - Wraps the export in a ready-made prompt (React + Tailwind, React + CSS, Vue 3, plain responsive HTML) so you can paste straight into an LLM
+- **Tabbed Preview | Code** - Flip between the live render and the generated code (HTML/JSX/CSS/TOON), each with a live token count
+- **Recent Grabs History** - Remembers your last 10 exports; click any one to reload its preview and copy it again
+- **Code Preview Page (Pop-out)** - Pop the dock out into a full-tab, side-by-side code + preview view with syntax highlighting and live code editing
 - **Live Code Editor** - Edit extracted code in-browser with real-time syntax highlighting (Prism-Live)
 - **Dynamic Live Preview** - Live HTML render that auto-adjusts orientation based on content aspect ratio
 - **Tailwind CSS Detection** - Automatically detects and flags Tailwind utility classes in extracted components
@@ -28,7 +33,7 @@ Pluck is a Chrome browser extension that lets you select any UI component from a
 - **Diagnostics Panel** - Collapsible panel above the preview tabs shows top-level selections captured, nodes dropped by the visibility filter, registry sizes, per-selection bounding boxes, and primary-font fallback warnings
 - **Download Fonts as Zip** - Bundles every embedded `@font-face` binary into a single zip you can save next to the exported HTML
 - **HTML Beautification** - Exported HTML is auto-formatted with proper indentation
-- **Live Element Preview in Popup** - Real-time visual preview and code snippet of hovered/selected elements right in the extension popup
+- **Live Element Preview** - Real-time visual preview and code snippet of the hovered/selected element right in the dock
 - **Hover State Extraction** - Captures `:hover` CSS pseudo-class styles along with base styles
 - **Dynamic Content Freezing** - Clones elements at selection time so dynamic/animated content is captured exactly as seen
 - **Custom Font Embedding** - Fetches and embeds WOFF/WOFF2 fonts as base64 data URLs for fully offline exports
@@ -60,7 +65,7 @@ Pluck is a Chrome browser extension that lets you select any UI component from a
 
 5. **Verify installation**
    - You should see the Pluck icon in your browser toolbar
-   - Click it to open the popup and start using the extension
+   - Click it to open the side-panel dock and start using the extension
 
 ---
 
@@ -68,34 +73,40 @@ Pluck is a Chrome browser extension that lets you select any UI component from a
 
 1. **Navigate** to any webpage you want to extract components from
 
-2. **Activate Pluck** by either:
-   - Clicking the extension icon and pressing "Start Selecting", or
+2. **Open the dock & start selecting** by either:
+   - Clicking the extension icon (opens the side-panel dock) and pressing "Start Selecting", or
    - Using the keyboard shortcut (Ctrl+Shift+S / Cmd+Shift+S)
 
 3. **Hover** over elements to see them highlighted with a red outline
 
 4. **Click** on an element to select it (turns blue)
    - Hold **Shift + Click** to select multiple elements
-   - The popup shows a live count of selected elements (e.g., "3 elements selected")
+   - The dock shows a live count of selected elements (e.g., "3 elements selected")
 
 5. **Stop selecting** by either:
    - Pressing the same shortcut again (Ctrl+Shift+S / Cmd+Shift+S), or
-   - Clicking "Stop Selecting" in the popup
+   - Clicking "Stop Selecting" in the dock
 
 6. **Export** your selection:
-   - Click the "Export" button in the popup, or
+   - Click the "Export" button in the dock, or
    - Use the keyboard shortcut (Ctrl+Shift+E / Cmd+Shift+E)
 
-7. **Code Preview Page** opens with:
-   - Syntax-highlighted HTML, JSX, CSS, and TOON tabs
-   - Live preview of the rendered component
-   - Edit, copy, and download actions
+7. **Done — it's already on your clipboard.** Export auto-copies your chosen format (TOON by default) so you can paste straight into an LLM. In the dock you can also:
+   - Switch between the **Preview** and **Code** tabs (HTML / JSX / CSS / TOON), each with a live token count
+   - Hit **Copy for AI** to copy the export wrapped in a ready-made prompt
+   - Reload any of your **last 10 grabs** from the history
 
 ---
 
-## Code Preview Page
+## The Dock: Preview | Code
 
-When you export a component, Pluck opens a dedicated **Code Preview Page** with a full-featured code viewer and editor.
+When you export, the result appears right in the side-panel dock — no new tab. The dock has a tabbed **Preview | Code** workspace, and the export is auto-copied to your clipboard the instant it lands. Need more room? **Pop it out** (the ⧉ button) into a full-tab, side-by-side code + preview view with the same editor and syntax highlighting.
+
+### Auto-Copy & Copy for AI
+
+- **Auto-copy on export** - The moment you export, your chosen format is on the clipboard. Pick which one in Settings: **TOON** (default), HTML, JSX, CSS, or off.
+- **Copy for AI** - Copies the export wrapped in a ready-made prompt. Choose a preset (React + Tailwind, React + CSS, Vue 3, plain responsive HTML) so you can paste straight into Claude/ChatGPT and go.
+- **Live token counts** - Each format tab shows an estimated token count so you know exactly how much you're sending the model.
 
 ### Tabs
 
@@ -143,7 +154,7 @@ Click **Edit** to enter edit mode powered by [Prism-Live](https://live.prismjs.c
 |--------|-----|-----------------|-------|
 | Toggle Selection | `Cmd + Shift + S` | `Ctrl + Shift + S` | Press again to stop |
 | Clear Selection | `Escape` | `Escape` | Clears all selected elements |
-| Export | `Cmd + Shift + E` | `Ctrl + Shift + E` | Opens Code Preview Page |
+| Export | `Cmd + Shift + E` | `Ctrl + Shift + E` | Exports + auto-copies; shows result in the dock |
 | Extract Full Page | `Cmd + Shift + F` | `Ctrl + Shift + F` | Selects `<body>` and exports immediately |
 | X-Ray Mode | `Cmd + Shift + X` | `Ctrl + Shift + X` | Toggle element inspector |
 | Color Picker | `Cmd + Shift + P` | `Ctrl + Shift + P` | Pick any color from screen |
@@ -152,7 +163,7 @@ Click **Edit** to enter edit mode powered by [Prism-Live](https://live.prismjs.c
 | Exact Target | `⌥ + Click` (Option) | `Alt + Click` | Bypasses smart container expansion |
 | Multi-Select | `Shift + Click` | `Shift + Click` | Add more elements to the selection |
 
-### Code Preview Page Shortcuts
+### Preview | Code (Pop-out) Shortcuts
 
 | Action | Mac | Windows / Linux |
 |--------|-----|-----------------|
@@ -167,11 +178,11 @@ Click **Edit** to enter edit mode powered by [Prism-Live](https://live.prismjs.c
 
 ### Customizing Shortcuts
 
-1. Click the Pluck extension icon
-2. Click "Customize Shortcuts" to expand settings
+1. Open the dock (click the Pluck extension icon) and open **Settings** (the gear icon)
+2. Find the shortcuts section
 3. Click modifier buttons (⌘/Ctrl, ⇧, ⌥/Alt) to toggle them
 4. Click the key input and press your desired key
-5. Click "Save Shortcuts" to apply changes
+5. Save to apply changes
 
 ---
 
@@ -213,7 +224,7 @@ Standalone CSS output with:
 
 ### Tailwind CSS Detection
 
-When a component uses **Tailwind CSS** utility classes, Pluck automatically detects them and displays a badge in the popup. This helps you identify Tailwind-based components so you can use the appropriate approach when recreating them.
+When a component uses **Tailwind CSS** utility classes, Pluck automatically detects them and displays a badge in the dock. This helps you identify Tailwind-based components so you can use the appropriate approach when recreating them.
 
 ---
 
@@ -285,7 +296,7 @@ X-Ray Mode is a powerful inspection tool inspired by [Pesticide](https://chrome.
 ### Activating X-Ray Mode
 
 - **Keyboard shortcut**: `Cmd + Shift + X` (Mac) or `Ctrl + Shift + X` (Windows/Linux)
-- **Button**: Click the layers icon in the Pluck popup
+- **Button**: Click the layers icon in the Pluck dock
 
 ### What You See
 
@@ -331,7 +342,7 @@ The Color Picker lets you sample any color from the screen with pixel-perfect ac
 ### Activating Color Picker
 
 - **Keyboard shortcut**: `Cmd + Shift + P` (Mac) or `Ctrl + Shift + P` (Windows/Linux)
-- **Button**: Click the eyedropper icon in the Pluck popup
+- **Button**: Click the eyedropper icon in the Pluck dock
 
 ### How It Works
 
@@ -398,61 +409,66 @@ The Color Picker lets you sample any color from the screen with pixel-perfect ac
 Pluck uses the Chrome Extension Manifest V3 architecture:
 
 ```
-┌─────────────┐     Messages      ┌──────────────────┐
-│   Popup     │ ───────────────→  │  Content Script  │
-│  (popup.js) │                   │ (contentScript.js)│
-└─────────────┘                   └────────┬─────────┘
-                                           │
-                                           │ Messages
-                                           ▼
-                                  ┌──────────────────┐
-                                  │   Background     │
-                                  │ (background.js)  │
-                                  └────────┬─────────┘
-                                           │
-                                           │ Opens
-                                           ▼
-                                  ┌──────────────────┐
-                                  │  Preview Page    │
-                                  │  (preview.html)  │
-                                  └──────────────────┘
+┌──────────────────┐    Messages    ┌───────────────────┐
+│ Side-Panel Dock  │ ─────────────→ │  Content Script   │
+│ (panel.js)       │                │ (contentScript.js)│
+└──────────────────┘                └─────────┬─────────┘
+                                              │
+                                              │ Messages
+                                              ▼
+                                    ┌──────────────────┐
+                                    │   Background     │
+                                    │ (background.js)  │
+                                    └────────┬─────────┘
+                                             │
+                                             │ Opens side panel /
+                                             │ stages export data
+                                             ▼
+                                    ┌──────────────────────┐
+                                    │  Pop-out Preview     │
+                                    │  (preview.html)      │
+                                    └──────────────────────┘
 ```
 
-**Popup** (`popup.html` + `popup.js`)
-- User interface for controlling the extension
-- Sends messages to content script to start/stop selection
-- Displays current status, settings, and live element preview
+**Side-Panel Dock** (`panel.html` + `panel.js` + `panel.css`)
+- The primary UI, opened in Chrome's side panel when you click the toolbar icon
+- Controls selection, shows status/settings, live element preview, and recent-grabs history
+- Tabbed Preview | Code workspace with token counts; auto-copy and Copy-for-AI on export
 
 **Content Script** (`contentScript.js`)
 - Injected into every webpage
 - Handles element selection and highlighting
 - Extracts styles and builds export data (HTML, JSX, CSS, TOON)
 - Detects Tailwind CSS usage
-- Core extraction engine (~64KB)
+- Core extraction engine
 
 **Background Service Worker** (`background.js`)
+- Opens the side panel and stages export data for the dock
 - Handles file downloads via Chrome Downloads API
-- Captures visible tab for Color Picker and live preview
-- Opens the Code Preview Page on export
+- Captures the visible tab for Color Picker and live preview
 
-**Code Preview Page** (`preview.html` + `preview.js`)
-- Dedicated page for viewing and editing extracted code
-- Syntax highlighting via PrismJS
-- Live code editing via Prism-Live
-- Dynamic live preview with auto-orientation
-- Download individual or all export formats
+**Pop-out Preview** (`preview.html` + `preview.js`)
+- Full-tab, side-by-side code + preview view popped out from the dock
+- Syntax highlighting via PrismJS; live code editing via Prism-Live
+- Dynamic live preview with auto-orientation; download individual or all formats
+
+> **Note:** `popup.html` / `popup.js` are the retired pre-v3 popup UI, kept for reference. Clicking the toolbar icon now opens the side-panel dock, not the popup.
 
 ### File Structure
 
 ```
 Pluck/
 ├── manifest.json          # Extension configuration (Manifest V3)
-├── popup.html             # Popup UI markup
-├── popup.js               # Popup logic and event handlers
-├── background.js          # Service worker for downloads & preview
+├── panel.html             # Side-panel dock markup
+├── panel.css              # Dock styles (theme, layout)
+├── panel.js               # Dock logic: selection, tabs, auto-copy, history
+├── background.js          # Service worker: side panel, downloads, tab capture
 ├── contentScript.js       # Core selection and extraction engine
-├── preview.html           # Code Preview Page markup & styles
-├── preview.js             # Preview page logic, editor, live preview
+├── preview.html           # Pop-out preview page markup & styles
+├── preview.js             # Pop-out logic, editor, live preview
+├── popup.html             # Retired pre-v3 popup UI (kept for reference)
+├── popup.js               # Retired pre-v3 popup logic
+├── icons/                 # Extension icons (16/32/48/128)
 ├── lib/
 │   ├── beautify-html.js   # HTML beautification library
 │   ├── bliss.js           # Bliss.js (DOM helper, Prism-Live dependency)
@@ -479,7 +495,9 @@ Pluck/
 | **HTML Beautification** | Auto-formats HTML output with proper indentation via js-beautify |
 | **JSX Conversion** | Converts HTML attributes to JSX equivalents (class→className, etc.) |
 | **Tailwind Detection** | Identifies Tailwind CSS utility classes in extracted components |
-| **Popup Live Preview** | Real-time visual preview and code snippet of selected elements in the popup |
+| **Dock Live Preview** | Real-time visual preview and code snippet of selected elements in the side-panel dock |
+| **Auto-Copy & Copy for AI** | Chosen format auto-copied on export; Copy-for-AI wraps it in a prompt preset |
+| **Parallel Font Fetch** | Custom-font fetching is parallel, time-boxed, and memoized so one slow font URL can't hang an export |
 | **Live Code Editor** | Prism-Live powered in-browser code editing with syntax highlighting |
 | **Dynamic Live Preview** | iframe-based HTML render that auto-switches between sidebar and bottom strip |
 | **Platform-Aware Shortcuts** | Auto-detects Mac vs Windows/Linux and uses appropriate modifier keys |
@@ -495,6 +513,8 @@ Pluck/
 | `storage` | Save user preferences, custom shortcuts, and export data for preview page |
 | `downloads` | Download exported HTML, JSX, CSS, and TOON files |
 | `webNavigation` | Detect frames and iframes for cross-frame support |
+| `clipboardWrite` | Auto-copy exports and Copy-for-AI output to the clipboard |
+| `sidePanel` | Show the Pluck dock in Chrome's side panel |
 
 ### Browser Compatibility
 
@@ -510,5 +530,7 @@ Pluck/
 ---
 
 ## Acknowledgments
+
+Huge thanks to **Deep Bansal** for leading the **v3.1.0 revamp** — the side-panel dock, AI-first auto-copy export, Copy-for-AI prompts, and the extraction-fidelity + performance overhaul.
 
 Special thanks to **Shaurya** for the creative vision and helping me make this tool.
