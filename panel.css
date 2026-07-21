@@ -66,7 +66,8 @@ body {
 }
 .hdr-logo .material-symbols-outlined { font-size: 17px; font-variation-settings: 'FILL' 1; }
 .hdr-title { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; }
-.hdr-by { font-size: 9px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.6px; }
+.hdr-by { font-size: 8px; font-weight: 700; color: var(--accent-2); background: var(--accent-soft); text-transform: uppercase; letter-spacing: 0.8px; padding: 2px 5px; border-radius: 5px; }
+.hdr-brand-svg { height: 20px; width: auto; color: var(--text); opacity: 0.7; } /* Scaler wordmark; matches preview header size */
 .hdr-spacer { flex: 1; }
 .icon-btn {
   width: 30px; height: 30px; border-radius: 8px;
