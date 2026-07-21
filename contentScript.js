@@ -151,6 +151,13 @@ function injectHelperStyles(root = document) {
 // pickMode changes (see the appended applyPickCursor() calls).
 function applyPickCursor() {
   try { if (document.documentElement) document.documentElement.classList.toggle('pluck-picking', !!pickMode); } catch (e) {}
+  // Selection turned on → minimize the dock so the whole viewport is free for picking.
+  // Central here so EVERY trigger is covered (dock button via START_PICK_MODE, the
+  // ⌘⇧S command, page keyboard). The dock closes itself on this flag and reopens on
+  // export. Top frame only, to avoid redundant writes from injected iframes.
+  if (pickMode && window.top === window) {
+    try { chrome.storage.local.set({ pluckMinimized: true }); } catch (e) {}
+  }
 }
 
 function ensureStylesInShadow(el) {

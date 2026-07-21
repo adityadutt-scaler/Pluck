@@ -733,6 +733,13 @@ function wire() {
   // react to new exports from anywhere
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    // Selection started (from any trigger set pluckMinimized) → close the dock to free
+    // the viewport. Guard the pop-out window, which should stay open.
+    if (changes.pluckMinimized && changes.pluckMinimized.newValue === true
+        && !document.body.classList.contains('sidebyside')) {
+      try { window.close(); } catch (e) {}
+      return;
+    }
     if (changes.pluckExportData) {
       const d = changes.pluckExportData.newValue;
       if (d && d.exportedAt !== undefined && d.exportedAt !== lastExportedAt) {

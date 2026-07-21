@@ -25,13 +25,17 @@ function openDock(sender) {
 // sidePanel.open — but it must be called SYNCHRONOUSLY, before any await/message,
 // or the gesture is lost). onCommand hands us the active tab, so no async lookup.
 chrome.commands.onCommand.addListener((command, tab) => {
-  if (tab && tab.windowId != null) {
-    try { const p = chrome.sidePanel.open({ windowId: tab.windowId }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
-  }
   if (!tab || tab.id == null) return;
   if (command === 'toggle-select') {
+    // Do NOT open the dock — starting selection should free the viewport. The dock
+    // only auto-opens on export (below). If it's open, it minimizes itself.
     chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_PICK_MODE' }, () => void chrome.runtime.lastError);
   } else if (command === 'export-selection') {
+    // Open the dock SYNCHRONOUSLY here (the command is the required user gesture)
+    // before the async export runs, so the result lands in an open panel.
+    if (tab.windowId != null) {
+      try { const p = chrome.sidePanel.open({ windowId: tab.windowId }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    }
     exportFromTab(tab.id);
   }
 });
