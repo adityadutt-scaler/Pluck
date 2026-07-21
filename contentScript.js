@@ -1676,7 +1676,7 @@ async function toggleColorPickMode() {
     colorPickerCanvas = document.createElement('canvas');
     colorPickerCanvas.width = img.width;
     colorPickerCanvas.height = img.height;
-    colorPickerCtx = colorPickerCanvas.getContext('2d');
+    colorPickerCtx = colorPickerCanvas.getContext('2d', { willReadFrequently: true });
     colorPickerCtx.drawImage(img, 0, 0);
 
     // Create the UI
