@@ -151,6 +151,11 @@ function injectHelperStyles(root = document) {
 // pickMode changes (see the appended applyPickCursor() calls).
 function applyPickCursor() {
   try { if (document.documentElement) document.documentElement.classList.toggle('pluck-picking', !!pickMode); } catch (e) {}
+  // Selection on → flag the dock to minimize (frees the viewport); it reopens on export.
+  // Central here so every trigger is covered; top frame only.
+  if (pickMode && window.top === window) {
+    try { chrome.storage.local.set({ pluckMinimized: true }); } catch (e) {}
+  }
 }
 
 function ensureStylesInShadow(el) {
@@ -2299,11 +2304,8 @@ function shortenFontFamily(value) {
   const fonts = value.split(',').map(f => f.trim().replace(/["']/g, ''));
   const first = fonts[0].toLowerCase();
 
-  // A lone "Times"/"Times New Roman"/"serif" is the browser's DEFAULT serif — it
-  // means the page never set a real font on this element (e.g. Snowflake sets fonts
-  // only on deep text classes). Emitting it forces serif in the export, where the
-  // body reset is sans. Drop it so the element inherits the export's sans stack and
-  // matches what the live page actually shows.
+  // A lone "Times"/"serif" is the UA default (page set no real font here) — drop it so
+  // the element inherits the export's sans reset instead of forcing serif.
   if (fonts.length === 1 && ['times', 'times new roman', 'serif'].includes(first)) {
     return null;
   }
@@ -2350,9 +2352,7 @@ function detectFontFormat(url) {
   return null;
 }
 
-// chrome.runtime.sendMessage(FETCH_FONT) with a HARD timeout. Without this a slow
-// or hung font/stylesheet URL leaves the await pending forever and the export sits
-// on "Exporting…" until the socket dies — the AWS hang, but it slowed every site.
+// FETCH_FONT via background with a hard timeout — a slow/hung URL must never leave the export hanging.
 function bgFetch(url, timeoutMs = 4000) {
   return new Promise((resolve) => {
     let settled = false;
@@ -2368,9 +2368,7 @@ function bgFetch(url, timeoutMs = 4000) {
   });
 }
 
-// Memoized stylesheet-text fetch (base64 -> utf8). The network-font family scan used
-// to re-fetch EVERY stylesheet once per network font — O(fonts × sheets) round-trips,
-// which is what made big font-heavy pages crawl. Cache keyed by href; cleared per export.
+// Memoized stylesheet-text fetch — avoids re-fetching every sheet per font (O(fonts × sheets)). Cleared per export.
 const _sheetCssCache = new Map();
 async function getSheetCssText(href) {
   if (_sheetCssCache.has(href)) return _sheetCssCache.get(href);
@@ -2489,9 +2487,7 @@ async function extractFontFaces() {
   _sheetCssCache.clear(); // fresh per export; memoizes sheet fetches within this run
 
   // First, get fonts from stylesheets (more accurate - has family names).
-  // CORS-blocked sheets can't be read directly — collect their hrefs and fetch them
-  // ALL in parallel afterward instead of awaiting one at a time (the serial awaits
-  // were the remaining slow-down on sites with many cross-origin stylesheets).
+  // Collect CORS-blocked sheet hrefs; fetch them all in parallel below (serial awaits were slow).
   const corsBlockedHrefs = [];
   for (const sheet of document.styleSheets) {
     try {
@@ -2642,10 +2638,7 @@ function collectUsedFontFamilies(nodes) {
     if (node.inlineStyle) {
       extractFromStyle(node.inlineStyle);
     }
-    // Check style class reference. Registry KEYS are JSON.stringify(styleObj),
-    // so the CSS-syntax regex in extractFromStyle never matched (`"font-family":`
-    // has a quote before the colon) — every used font was dropped and nothing got
-    // embedded. Parse the JSON and read the family directly.
+    // Registry keys are JSON, not CSS — parse and read the family directly (a CSS regex never matched).
     if (node.style && styleRegistry) {
       for (const [styleJson, name] of styleRegistry.entries()) {
         if (name === node.style) {
@@ -3942,9 +3935,7 @@ async function buildExport() {
   });
   if (!selectedElements.size) return null;
 
-  // Tell the dock an export just started so it can show the loader immediately —
-  // covers EVERY trigger (dock button, ⌘⇧E keyboard, command). The dock hides it
-  // when the result renders. Callback swallows "no receiver" when the dock is closed.
+  // Signal the dock to show its loader now (covers every trigger); it hides on result.
   try { chrome.runtime.sendMessage({ type: 'EXPORT_STARTED' }, () => void chrome.runtime.lastError); } catch (e) {}
 
   resetStyleRegistry();
@@ -3987,14 +3978,8 @@ async function buildExport() {
     let hasPositioned = false;
 
     for (const original of originals) {
-      // ponytail: clone FRESH at export, not the selection-time clone. A stale clone
-      // can structurally diverge from the live DOM (apps like Notion re-render between
-      // select and export); buildCloneMapping pairs clone↔original by index, so a
-      // mismatch fell back to the detached clone — whose getComputedStyle returns
-      // INITIAL values (display:block, gap:normal), collapsing flex rows into vertical
-      // stacks and killing gaps. A fresh clone always matches the current original, so
-      // every node reads styles from its real (attached) element. Trade-off: content is
-      // frozen at export time instead of selection time (fine, and more predictable).
+      // Clone FRESH at export: a stale selection-time clone can diverge from the live DOM
+      // (index-paired mapping then falls back to INITIAL styles, collapsing flex rows).
       const clone = original.cloneNode(true);
       buildCloneMapping(original, clone, cloneToOriginal);
 
@@ -4273,9 +4258,7 @@ async function buildExport() {
       const usedFonts = filterUsedFonts(allFontFaces, usedFontFamilies);
       console.log('[Pluck] Fonts to embed:', usedFonts.size);
 
-      // Fetch and convert fonts to base64 — in PARALLEL. Serial awaits made total
-      // time the SUM of every font's latency; concurrent makes it the slowest one
-      // (each already bounded by bgFetch's timeout).
+      // Fetch fonts in PARALLEL — serial awaits summed every font's latency.
       await Promise.all(Array.from(usedFonts.values()).map(async (font) => {
         console.log('[Pluck] Fetching font:', font.family, font.url);
         font.dataUrl = await fetchFontAsBase64(font.url);
@@ -4407,10 +4390,8 @@ export default Component;`;
   const finalHtml = typeof beautifyHtml === 'function' ? beautifyHtml(html) : html;
   const finalJsx = typeof beautifyJsx === 'function' ? beautifyJsx(jsxComponent) : jsxComponent;
 
-  // Diagnostics are best-effort and must NEVER abort the export. On slow-font pages
-  // (e.g. AWS, where many @font-face URLs 404 during the awaits above) two exports can
-  // overlap and one nulls the shared _exportDiag — plus a malformed style could throw.
-  // Use a local fallback object and swallow any error so the export always returns.
+  // Diagnostics are best-effort — never abort the export (a concurrent grab may null
+  // _exportDiag). Local fallback + swallow errors so the export always returns.
   const diag = _exportDiag || {};
   try {
     diag.styleCount = styleRegistry.size;

@@ -21,17 +21,16 @@ function openDock(sender) {
   }
 }
 
-// Keyboard commands open the side panel (a command IS a valid user gesture for
-// sidePanel.open — but it must be called SYNCHRONOUSLY, before any await/message,
-// or the gesture is lost). onCommand hands us the active tab, so no async lookup.
 chrome.commands.onCommand.addListener((command, tab) => {
-  if (tab && tab.windowId != null) {
-    try { const p = chrome.sidePanel.open({ windowId: tab.windowId }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
-  }
   if (!tab || tab.id == null) return;
   if (command === 'toggle-select') {
+    // Don't open the dock — selection frees the viewport; the dock reopens on export.
     chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_PICK_MODE' }, () => void chrome.runtime.lastError);
   } else if (command === 'export-selection') {
+    // Open synchronously (the command is the user gesture) before the async export.
+    if (tab.windowId != null) {
+      try { const p = chrome.sidePanel.open({ windowId: tab.windowId }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    }
     exportFromTab(tab.id);
   }
 });
@@ -60,8 +59,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'FETCH_FONT') {
     const { url } = message;
 
-    // Abort a slow/hung request so we always send a response (content-side also
-    // times out, but this frees the socket instead of leaving it dangling).
+    // Abort a slow/hung request so we always respond and free the socket.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
 

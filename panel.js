@@ -336,10 +336,13 @@ function trimForHistory(d) {
 }
 function pushHistory(d) {
   chrome.storage.local.get('pluckHistory', (r) => {
-    let hist = r.pluckHistory || [];
-    hist.unshift(trimForHistory(d));
-    hist = hist.slice(0, 10);
-    chrome.storage.local.set({ pluckHistory: hist }, () => renderHistory(hist));
+    let hist = [trimForHistory(d), ...(r.pluckHistory || [])].slice(0, 10);
+    // Self-heal: if a write ever hits the storage quota, drop the oldest and retry.
+    const save = () => chrome.storage.local.set({ pluckHistory: hist }, () => {
+      if (chrome.runtime.lastError && hist.length > 1) { hist = hist.slice(0, -1); save(); }
+      else renderHistory(hist);
+    });
+    save();
   });
 }
 function renderHistory(hist) {
@@ -723,9 +726,7 @@ function wire() {
     if (await writeClipboard(pendingCopy)) { showToast(`${settings.autoCopyFormat.toUpperCase()} copied`); pendingCopy = null; }
   });
 
-  // Show the loader the instant an export starts, from ANY trigger (button, ⌘⇧E,
-  // command). loadExport() hides it when the result renders; the safety timeout
-  // in setExporting covers the rare failure.
+  // Show the loader the instant an export starts (any trigger); loadExport hides it.
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === 'EXPORT_STARTED') setExporting(true);
   });
@@ -733,6 +734,12 @@ function wire() {
   // react to new exports from anywhere
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    // Selection started → close the dock to free the viewport (pop-out stays open).
+    if (changes.pluckMinimized && changes.pluckMinimized.newValue === true
+        && !document.body.classList.contains('sidebyside')) {
+      try { window.close(); } catch (e) {}
+      return;
+    }
     if (changes.pluckExportData) {
       const d = changes.pluckExportData.newValue;
       if (d && d.exportedAt !== undefined && d.exportedAt !== lastExportedAt) {
