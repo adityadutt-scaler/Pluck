@@ -286,7 +286,7 @@ body {
 
 /* ===== Diagnostics ===== */
 .diag-wrap { padding: 0 14px 10px; flex-shrink: 0; }
-.diag { background: var(--surface); border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden; }
+.diag { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .diag summary { list-style: none; cursor: pointer; padding: 8px 12px; font-size: 11.5px; color: var(--text-dim); display: flex; align-items: center; gap: 9px; flex-wrap: wrap; user-select: none; }
 .diag summary::-webkit-details-marker { display: none; }
 .diag summary::before { content: '▸'; font-size: 9px; color: var(--text-faint); transition: transform 0.15s; }
