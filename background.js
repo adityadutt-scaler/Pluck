@@ -1,10 +1,71 @@
-// Background script for handling downloads and font fetching
+// Background script for handling downloads, font fetching, and the side-panel dock.
+
+// Clicking the toolbar icon opens the side-panel cockpit.
+if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((e) => console.warn('[Pluck] setPanelBehavior failed:', e));
+}
+
+// Best-effort open of the side panel for a given tab/window.
+function openDock(sender) {
+  if (!chrome.sidePanel || !chrome.sidePanel.open) return;
+  const opts = {};
+  if (sender && sender.tab && sender.tab.windowId != null) opts.windowId = sender.tab.windowId;
+  else if (sender && sender.tab && sender.tab.id != null) opts.tabId = sender.tab.id;
+  try {
+    const p = chrome.sidePanel.open(opts);
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) {
+    // open() requires a user gesture; if it fails the data is already staged
+    // and the dock will show it the next time the user opens it.
+  }
+}
+
+// Keyboard commands open the side panel (a command IS a valid user gesture for
+// sidePanel.open — but it must be called SYNCHRONOUSLY, before any await/message,
+// or the gesture is lost). onCommand hands us the active tab, so no async lookup.
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (tab && tab.windowId != null) {
+    try { const p = chrome.sidePanel.open({ windowId: tab.windowId }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+  }
+  if (!tab || tab.id == null) return;
+  if (command === 'toggle-select') {
+    chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_PICK_MODE' }, () => void chrome.runtime.lastError);
+  } else if (command === 'export-selection') {
+    exportFromTab(tab.id);
+  }
+});
+
+// Try every frame and use the one that actually has a selection. Sending to the
+// whole tab and taking the first reply lets an empty iframe answer null first and
+// swallow the export — which is why ⌘⇧E was flaky on iframe-heavy sites.
+async function exportFromTab(tabId) {
+  let frameIds = [0];
+  try { const fr = await chrome.webNavigation.getAllFrames({ tabId }); if (fr && fr.length) frameIds = fr.map((f) => f.frameId); } catch (e) {}
+  for (const frameId of frameIds) {
+    try {
+      const resp = await chrome.tabs.sendMessage(tabId, { type: 'EXPORT_SELECTION' }, { frameId });
+      if (resp && resp.toon) {
+        resp.exportedAt = Date.now();
+        resp.name = resp.name || 'component';
+        chrome.storage.local.set({ pluckExportData: resp });
+        return;
+      }
+    } catch (e) { /* frame without content script — skip */ }
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle font fetching (bypasses CORS restrictions)
   if (message.type === 'FETCH_FONT') {
     const { url } = message;
 
-    fetch(url)
+    // Abort a slow/hung request so we always send a response (content-side also
+    // times out, but this frees the socket instead of leaving it dangling).
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+
+    fetch(url, { signal: controller.signal })
       .then(response => {
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
@@ -22,8 +83,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         reader.readAsDataURL(blob);
       })
       .catch(error => {
-        sendResponse({ ok: false, error: error.message });
-      });
+        sendResponse({ ok: false, error: error.name === 'AbortError' ? 'timeout' : error.message });
+      })
+      .finally(() => clearTimeout(timer));
 
     return true; // Keep message channel open for async response
   }
@@ -71,39 +133,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // Handle opening preview tab (from content script keyboard shortcut)
-  // Captures tab screenshot, merges into stored data, then opens preview
+  // Export was triggered from the page (keyboard shortcut). The content script
+  // has already stored pluckExportData; we capture a screenshot, stamp it in,
+  // bump a counter so the dock's storage listener always fires, then open the dock.
   if (message.type === 'OPEN_PREVIEW_TAB') {
-    const openPreview = () => {
-      chrome.tabs.create({ url: chrome.runtime.getURL('preview.html') });
+    const stageAndOpen = (dataUrl) => {
+      chrome.storage.local.get('pluckExportData', (result) => {
+        const data = result.pluckExportData;
+        if (data) {
+          if (dataUrl) data.screenshotDataUrl = dataUrl;
+          // Unique, monotonic stamp so the dock always treats this as a new export.
+          // (A counter broke here: the fresh result never carries the prior value,
+          // so it was always 1 and repeat exports got skipped as "unchanged".)
+          data.exportedAt = Date.now();
+          chrome.storage.local.set({ pluckExportData: data }, () => {
+            openDock(sender);
+            sendResponse({ ok: true });
+          });
+        } else {
+          openDock(sender);
+          sendResponse({ ok: true });
+        }
+      });
     };
-
-    // Try to capture screenshot before opening
     try {
       chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
-        if (chrome.runtime.lastError || !dataUrl) {
-          openPreview();
-          sendResponse({ ok: true });
-          return;
-        }
-        chrome.storage.local.get('pluckExportData', (result) => {
-          if (result.pluckExportData) {
-            result.pluckExportData.screenshotDataUrl = dataUrl;
-            chrome.storage.local.set({ pluckExportData: result.pluckExportData }, () => {
-              openPreview();
-              sendResponse({ ok: true });
-            });
-          } else {
-            openPreview();
-            sendResponse({ ok: true });
-          }
-        });
+        stageAndOpen(chrome.runtime.lastError ? null : dataUrl);
       });
     } catch (e) {
-      openPreview();
-      sendResponse({ ok: true });
+      stageAndOpen(null);
     }
     return true; // Keep channel open for async
+  }
+
+  // The dock asks the worker to open/focus the side panel (it can't always
+  // satisfy the user-gesture requirement from a panel-internal handler).
+  if (message.type === 'OPEN_DOCK') {
+    openDock(sender);
+    sendResponse({ ok: true });
+    return true;
   }
 
   // Handle screen capture for color picker

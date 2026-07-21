@@ -39,6 +39,10 @@ async function init() {
       displayCode('html');
       updateBadge();
       loadVisualPreview();
+      renderDiagnostics(exportData.diagnostics);
+      if (btnDownloadFonts && exportData.fontFaces && exportData.fontFaces.some(f => f.ok)) {
+        btnDownloadFonts.hidden = false;
+      }
     } else {
       showEmptyState();
     }
@@ -396,7 +400,11 @@ document.addEventListener('keydown', (e) => {
 
 // ===== Live Preview =====
 let previewDebounce = null;
-let currentOrientation = 'bottom'; // 'bottom' or 'side'
+let currentOrientation = 'bottom';
+let manualOrientation = null;
+
+// Wider than this never goes in the side panel — would clip.
+const WIDE_CONTENT_THRESHOLD = 600;
 
 function loadVisualPreview() {
   if (!exportData) return;
@@ -406,7 +414,6 @@ function loadVisualPreview() {
 function updateLivePreview() {
   if (!exportData) return;
 
-  // Build a full HTML document to render in the iframe
   const htmlContent = exportData.html || '';
   const cssContent = exportData.css || '';
 
@@ -418,69 +425,107 @@ function updateLivePreview() {
   previewEmpty.style.display = 'none';
   previewPanel.classList.remove('hidden');
 
-  // Wrap content in an inline-block div so we can measure its natural dimensions
+  // Render at natural width inside a scaler; transform: scale fits it to the panel post-load.
   const doc = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-  body {
-    margin: 0; padding: 16px;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #ffffff; color: #1d1d1f;
-  }
+  html, body { margin: 0; padding: 0; background: #ffffff; color: #1d1d1f; }
   @media (prefers-color-scheme: dark) {
-    body { background: #1c1c1e; color: #f5f5f7; }
+    html, body { background: #1c1c1e; color: #f5f5f7; }
   }
+  #__pluck_scaler {
+    transform-origin: top left;
+    padding: 16px;
+    box-sizing: border-box;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  #__pluck_measure { display: inline-block; }
   ${cssContent}
 </style>
 </head>
-<body><div id="__pluck_measure" style="display:inline-block;max-width:100%">${htmlContent}</div></body>
+<body><div id="__pluck_scaler"><div id="__pluck_measure">${htmlContent}</div></div></body>
 </html>`;
 
   previewIframe.srcdoc = doc;
 
-  // After iframe loads, detect content's natural aspect ratio and switch orientation
   previewIframe.onload = () => {
     try {
       const iframeDoc = previewIframe.contentDocument || previewIframe.contentWindow.document;
       const measure = iframeDoc.getElementById('__pluck_measure');
-      if (!measure) return;
+      const scaler = iframeDoc.getElementById('__pluck_scaler');
+      if (!measure || !scaler) return;
 
       const contentWidth = measure.offsetWidth;
       const contentHeight = measure.offsetHeight;
-
       if (contentWidth === 0 || contentHeight === 0) return;
 
-      if (contentHeight > contentWidth * 1.2) {
-        // Vertical / portrait content → right sidebar
-        setPreviewOrientation('side');
-      } else {
-        // Horizontal / landscape / square content → bottom strip
-        setPreviewOrientation('bottom');
+      let target = manualOrientation;
+      if (!target) {
+        if (contentWidth > WIDE_CONTENT_THRESHOLD) target = 'bottom';
+        else if (contentHeight > contentWidth * 1.2) target = 'side';
+        else target = 'bottom';
       }
+      setPreviewOrientation(target);
+
+      // rAF so the panel's width/height transition has applied before we measure.
+      requestAnimationFrame(() => fitPreviewContent(scaler, contentWidth, contentHeight));
     } catch (e) {
       // Cross-origin or access error, keep current orientation
     }
   };
 }
 
-function setPreviewOrientation(orientation) {
-  if (orientation === currentOrientation) return;
-  currentOrientation = orientation;
+function fitPreviewContent(scaler, contentWidth, contentHeight) {
+  if (!scaler) return;
+  const body = document.getElementById('preview-panel-body');
+  if (!body) return;
+  const availW = body.clientWidth;
+  // +32 for the scaler's 16px all-sides padding.
+  const naturalW = contentWidth + 32;
+  const naturalH = contentHeight + 32;
+  const scale = Math.min(availW / naturalW, 1);
+  scaler.style.transform = `scale(${scale})`;
+  scaler.style.width = `${naturalW}px`;
+  scaler.style.height = `${naturalH}px`;
+  // Negative margins collapse the transform's leftover layout footprint.
+  scaler.style.marginBottom = `${(scale - 1) * naturalH}px`;
+  scaler.style.marginRight = `${(scale - 1) * naturalW}px`;
+}
 
+function setPreviewOrientation(orientation) {
   const toggleIcon = btnTogglePreview.querySelector('.material-symbols-outlined');
+  const flipIcon = document.querySelector('#btn-flip-orientation .material-symbols-outlined');
 
   if (orientation === 'side') {
     mainContent.classList.remove('main-content--bottom');
     mainContent.classList.add('main-content--side');
     if (toggleIcon) toggleIcon.textContent = 'chevron_right';
+    if (flipIcon) flipIcon.textContent = 'splitscreen_bottom';
   } else {
     mainContent.classList.remove('main-content--side');
     mainContent.classList.add('main-content--bottom');
     if (toggleIcon) toggleIcon.textContent = 'expand_more';
+    if (flipIcon) flipIcon.textContent = 'splitscreen_right';
   }
+  currentOrientation = orientation;
+}
+
+function flipPreviewOrientation() {
+  manualOrientation = currentOrientation === 'side' ? 'bottom' : 'side';
+  setPreviewOrientation(manualOrientation);
+  try {
+    const iframeDoc = previewIframe.contentDocument || previewIframe.contentWindow.document;
+    const measure = iframeDoc.getElementById('__pluck_measure');
+    const scaler = iframeDoc.getElementById('__pluck_scaler');
+    if (measure && scaler) {
+      requestAnimationFrame(() =>
+        fitPreviewContent(scaler, measure.offsetWidth, measure.offsetHeight)
+      );
+    }
+  } catch (e) {}
 }
 
 function scheduleLivePreviewUpdate() {
@@ -494,6 +539,218 @@ function togglePreviewPanel() {
 
 btnTogglePreview.addEventListener('click', togglePreviewPanel);
 btnShowPreview.addEventListener('click', togglePreviewPanel);
+
+const btnFlipOrientation = document.getElementById('btn-flip-orientation');
+if (btnFlipOrientation) btnFlipOrientation.addEventListener('click', flipPreviewOrientation);
+
+let resizeDebounce = null;
+window.addEventListener('resize', () => {
+  if (resizeDebounce) clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(() => {
+    try {
+      const iframeDoc = previewIframe.contentDocument || previewIframe.contentWindow.document;
+      const measure = iframeDoc.getElementById('__pluck_measure');
+      const scaler = iframeDoc.getElementById('__pluck_scaler');
+      if (measure && scaler) fitPreviewContent(scaler, measure.offsetWidth, measure.offsetHeight);
+    } catch (e) {}
+  }, 100);
+});
+
+// ===== Font zip download =====
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    table[i] = c;
+  }
+  return table;
+})();
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ bytes[i]) & 0xff];
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function buildZip(entries) {
+  const enc = new TextEncoder();
+  const localChunks = [];
+  const centralChunks = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const nameBytes = enc.encode(entry.name);
+    const data = entry.data;
+    const crc = crc32(data);
+    const size = data.length;
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true); lv.setUint16(6, 0, true); lv.setUint16(8, 0, true);
+    lv.setUint16(10, 0, true); lv.setUint16(12, 0, true);
+    lv.setUint32(14, crc, true); lv.setUint32(18, size, true); lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true); lv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+    localChunks.push(local, data);
+    const central = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true); cv.setUint16(12, 0, true); cv.setUint16(14, 0, true);
+    cv.setUint32(16, crc, true); cv.setUint32(20, size, true); cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true); cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true); cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true); cv.setUint32(42, offset, true);
+    central.set(nameBytes, 46);
+    centralChunks.push(central);
+    offset += local.length + size;
+  }
+  const centralStart = offset;
+  let centralSize = 0;
+  for (const c of centralChunks) centralSize += c.length;
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true); ev.setUint16(6, 0, true);
+  ev.setUint16(8, entries.length, true); ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, centralSize, true); ev.setUint32(16, centralStart, true);
+  ev.setUint16(20, 0, true);
+  const out = new Uint8Array(offset + centralSize + eocd.length);
+  let pos = 0;
+  for (const c of localChunks) { out.set(c, pos); pos += c.length; }
+  for (const c of centralChunks) { out.set(c, pos); pos += c.length; }
+  out.set(eocd, pos);
+  return out;
+}
+
+function fontFileName(face) {
+  const safeFam = face.family.replace(/[^A-Za-z0-9]/g, '');
+  const styleSuffix = face.style && face.style !== 'normal' ? `-${face.style}` : '';
+  const ext = face.format === 'truetype' ? 'ttf'
+    : face.format === 'opentype' ? 'otf'
+    : face.format === 'embedded-opentype' ? 'eot'
+    : face.format;
+  return `pluck-${safeFam}-${face.weight}${styleSuffix}.${ext}`;
+}
+
+function downloadFontsZip() {
+  if (!exportData || !exportData.fontFaces) return;
+  const ok = exportData.fontFaces.filter(f => f.ok && f.base64);
+  if (ok.length === 0) return;
+  const entries = ok.map(face => ({
+    name: fontFileName(face),
+    data: base64ToBytes(face.base64),
+  }));
+  const zipBytes = buildZip(entries);
+  const blob = new Blob([zipBytes], { type: 'application/zip' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'pluck-fonts.zip';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const btnDownloadFonts = document.getElementById('btn-download-fonts');
+if (btnDownloadFonts) btnDownloadFonts.addEventListener('click', downloadFontsZip);
+
+// ===== Diagnostics renderer =====
+function renderDiagnostics(d) {
+  const wrap = document.getElementById('diag');
+  if (!wrap || !d) return;
+  wrap.hidden = false;
+
+  const summary = document.getElementById('diag-summary');
+  summary.innerHTML = '';
+
+  const label = document.createElement('span');
+  label.textContent = 'Diagnostics';
+  summary.appendChild(label);
+
+  const pill = (text, warn) => {
+    const s = document.createElement('span');
+    s.className = 'diag-pill' + (warn ? ' warn' : '');
+    s.textContent = text;
+    summary.appendChild(s);
+  };
+
+  pill(`${d.selectionCount} selection${d.selectionCount === 1 ? '' : 's'}`);
+  if (d.wrapperCount > 0) pill(`${d.wrapperCount} parent-wrap${d.wrapperCount === 1 ? '' : 's'}`);
+  if (d.filteredCount > 0) pill(`${d.filteredCount} dropped`, true);
+  pill(`${d.styleCount} styles`);
+  if (d.pseudoStyleCount > 0) pill(`${d.pseudoStyleCount} pseudo`);
+  if (d.tailwindMode) pill('tailwind');
+  if (d.primaryFont && !d.primaryFontWillLoad) {
+    pill(`font fallback: ${d.primaryFont}`, true);
+  }
+
+  const body = document.getElementById('diag-body');
+  body.innerHTML = '';
+
+  if (d.filteredCount > 0) {
+    const note = document.createElement('div');
+    note.className = 'diag-row';
+    note.style.color = '#fbbf24';
+    note.innerHTML = `<span class="meta">Filtered ${d.filteredCount} hidden node${d.filteredCount === 1 ? '' : 's'} from descendants. Use Alt+Click for exact targeting if you need them.</span>`;
+    body.appendChild(note);
+  }
+
+  if (d.primaryFont && !d.primaryFontWillLoad) {
+    const note = document.createElement('div');
+    note.className = 'diag-row';
+    note.style.color = '#fbbf24';
+    note.innerHTML = `<span class="meta">Primary font <strong>${d.primaryFont}</strong> isn't on Google Fonts — export will fall back to the system stack and text widths may shift.</span>`;
+    body.appendChild(note);
+  }
+
+  if (!d.selections || d.selections.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'diag-row';
+    empty.innerHTML = `<span class="meta">No top-level selections recorded.</span>`;
+    body.appendChild(empty);
+    return;
+  }
+
+  for (const s of d.selections) {
+    const row = document.createElement('div');
+    row.className = 'diag-row';
+
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = `<${s.tag}>`;
+    row.appendChild(tag);
+
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    const cls = s.className ? `.${s.className.replace(/\s+/g, '.')}` : '';
+    meta.textContent = `${cls} — ${s.w}×${s.h} at (${s.x}, ${s.y})`;
+    row.appendChild(meta);
+
+    if (s.wrapped) {
+      const b = document.createElement('span');
+      b.className = 'badge';
+      b.textContent = 'wrapped';
+      row.appendChild(b);
+    }
+    if (!s.kept) {
+      const b = document.createElement('span');
+      b.className = 'badge dropped';
+      b.textContent = 'dropped';
+      row.appendChild(b);
+    }
+
+    body.appendChild(row);
+  }
+}
 
 // ===== Start =====
 init();
