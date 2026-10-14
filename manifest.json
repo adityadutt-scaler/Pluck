@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Pluck",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Pluck UI components from any webpage and export them as standalone HTML with styles.",
-  "permissions": ["activeTab", "scripting", "webNavigation", "storage", "unlimitedStorage", "downloads", "clipboardWrite", "sidePanel"],
+  "permissions": ["activeTab", "scripting", "webNavigation", "storage", "unlimitedStorage", "downloads", "clipboardWrite", "sidePanel", "debugger"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Open Pluck dock",

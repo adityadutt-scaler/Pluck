@@ -289,6 +289,56 @@ div.s1[background:#fff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);pa
 
 ---
 
+## Agent Bridge — captures driven by a coding agent
+
+A coding agent that can run JavaScript in the page (Claude in Chrome, Playwright, a devtools
+console) can capture without the dock or the keyboard. Content scripts run in an isolated
+world, so the agent can't call Pluck directly; it posts a message on the page, and Pluck
+answers on an attribute of `<html>` that the agent reads back:
+
+```js
+window.postMessage({ __pluckAgent: 'capture', id: 'c1', name: 'checkout-card',
+  selector: '#checkout .card',   // or selectors:[…] | point:{x,y} | hovered:true | fullPage:true
+  exact: true,                   // false = the same smart expansion a click uses
+  expect: { text: ['Order summary', 'Place order'] } }, '*');
+// then poll:
+document.documentElement.getAttribute('data-pluck-result')
+// {"id":"c1","status":"done","paths":{"toon":"pluck/localhost-3000/checkout-card.toon",
+//  "html":"…"},"missing":[],"fingerprint":"9c1e04af","sameAsLast":false,"targets":[…]}
+```
+
+| Option | What it does |
+|---|---|
+| `selector` | One element. `exact:true` takes it as-is; otherwise it expands like a click. |
+| `selectors: [...]` | Several elements in one capture, like Shift+Click (each as-is unless `exact:false`). One that matches nothing fails the request and is named in `missing`. |
+| `combine: 'ancestor'` | With `selectors`: capture their nearest common parent instead. |
+| `point`, `hovered`, `fullPage` | The element at a point, under the real pointer (keeps a hover menu open), or the whole page. |
+| `hover`, `hoverMs` | Before capturing, move the real pointer to `hover` (a selector, scrolled into view and aimed at its centre, or viewport `{x, y}`) and wait `hoverMs` (default 500) for a hover menu, tooltip or hover colour to appear. Then capture it with `hovered: true` or its own `selector`. Combine with `preview` to look without saving; `hover` on an empty spot moves the pointer away. |
+| `preview: true` | Outline the target for `previewMs` (default 4000) and report what is inside: box, hidden / off-screen, headings, controls with labels, text. Nothing is saved. |
+| `expect: { text: [...] }` | Labels the capture must contain. `missing` lists the ones the exported TOON's text doesn't (ignoring case and whitespace). |
+| `formats` | `['toon', 'html']` by default. |
+| `redactParams: [...]` | Extra URL parameter names to blank in this capture (the app's own session key). |
+
+The export runs through the same `buildExport()` as the dock, without opening the dock or
+touching your own selection, and the worker saves `Downloads/pluck/<site>/<name>.toon` and
+`.html`, overwriting a previous capture of the same name. `done` is only reported once Chrome
+says the download is complete. Every capture carries a `fingerprint`, and `sameAsLast: true`
+when it equals the previous one (a menu that had already closed). One request runs at a time.
+
+**Allowed sites.** Any script on a page can post that message, so the bridge only answers on
+local development hosts (`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`, any port) and on
+sites you switch on with **Agent captures** in the dock, above Start Selecting (that exact origin, port
+included). Only the dock can change the list, and a site that is not allowed gets no reply at
+all. Each site saves into its own folder, paths are reported relative to Downloads, and
+sensitive URL parameters (`token`, `sid`, `session`, `signature`, `api_key`, …) are blanked
+in saved files, in the query, the fragment and URL-encoded links. The list and the redaction names live in `chrome.storage.local` under
+`pluckAgentBridge` (`{ enabled, origins, redactParams }`).
+
+See [docs/agent-bridge.md](docs/agent-bridge.md) for the full round trip and
+[`scripts/agent-import.sh`](scripts/agent-import.sh) for moving captures into a project.
+
+---
+
 ## X-Ray Mode
 
 X-Ray Mode is a powerful inspection tool inspired by [Pesticide](https://chrome.google.com/webstore/detail/pesticide-for-chrome) that helps you understand the structure and layout of any webpage.
@@ -463,11 +513,13 @@ Pluck/
 ├── panel.css              # Dock styles (theme, layout)
 ├── panel.js               # Dock logic: selection, tabs, auto-copy, history
 ├── background.js          # Service worker: side panel, downloads, tab capture
-├── contentScript.js       # Core selection and extraction engine
+├── contentScript.js       # Core selection and extraction engine (+ agent bridge)
 ├── preview.html           # Pop-out preview page markup & styles
 ├── preview.js             # Pop-out logic, editor, live preview
 ├── popup.html             # Retired pre-v3 popup UI (kept for reference)
 ├── popup.js               # Retired pre-v3 popup logic
+├── docs/agent-bridge.md   # Driving Pluck from a coding agent
+├── scripts/agent-import.sh # Move an agent capture from Downloads into a project
 ├── icons/                 # Extension icons (16/32/48/128)
 ├── lib/
 │   ├── beautify-html.js   # HTML beautification library
@@ -510,11 +562,12 @@ Pluck/
 |------------|---------|
 | `activeTab` | Access the currently active tab when user clicks the extension |
 | `scripting` | Inject content scripts into web pages |
-| `storage` | Save user preferences, custom shortcuts, and export data for preview page |
-| `downloads` | Download exported HTML, JSX, CSS, and TOON files |
+| `storage` | Save user preferences, custom shortcuts, export data for preview page, and the agent bridge's allowed sites |
+| `downloads` | Download exported HTML, JSX, CSS, and TOON files (agent captures go to `Downloads/pluck/<site>/`) |
 | `webNavigation` | Detect frames and iframes for cross-frame support |
 | `clipboardWrite` | Auto-copy exports and Copy-for-AI output to the clipboard |
 | `sidePanel` | Show the Pluck dock in Chrome's side panel |
+| `debugger` | Move the real pointer for an agent capture's `hover` (only Chrome's own input sets `:hover`). Attached to that tab for one mouse move on an allowed site, then detached; it never clicks or types. Chrome may briefly show its "started debugging this browser" bar |
 
 ### Browser Compatibility
 

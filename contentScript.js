@@ -17,6 +17,19 @@ let _exportDiag = null;
 // --- Tailwind mode (set in buildExport when source page uses Tailwind) ---
 let _tailwindStyles = null;
 
+// --- Set while the agent bridge exports, so the dock isn't told to show its
+// loader for a capture that never reaches it ---
+let _agentExporting = false;
+
+// --- One export at a time: exports share the selection and the style
+// registries, so a dock export and an agent capture must not interleave ---
+let _exportQueue = Promise.resolve();
+function exclusiveExport(task) {
+  const run = _exportQueue.then(task, task);
+  _exportQueue = run.catch(() => {});
+  return run;
+}
+
 // --- X-Ray Inspector State ---
 let inspectorOverlay = null;
 let inspectorHoverLabel = null;
@@ -3300,6 +3313,11 @@ function buildStructure(el, isRoot = false) {
   const node = {
     tag: tagName
   };
+  // The clone's <canvas> is empty; its bitmap was read before the export.
+  if (tagName === 'canvas' && _canvasPixels.has(originalEl)) {
+    node.tag = 'img';
+    node.src = _canvasPixels.get(originalEl);
+  }
 
   // el is a CLONE - text is frozen at clone time, safe to read directly
   // Build ordered child nodes list (text nodes and elements interleaved)
@@ -3928,7 +3946,91 @@ function buildCloneMapping(original, clone, map) {
 }
 
 // --- Build compact JSON export ---
-async function buildExport() {
+function buildExport() {
+  return exclusiveExport(buildExportNow);
+}
+
+// Canvas bitmaps of the current export, keyed by the live <canvas> element.
+let _canvasPixels = new Map();
+
+/**
+ * A cloned <canvas> carries no pixels: the bitmap exists only on the page's
+ * own element. Read every canvas in the selection up front, as a PNG data URL.
+ * A tainted canvas (cross-origin image) throws, and a WebGL one without
+ * preserveDrawingBuffer reads back transparent; both are cropped out of a
+ * screenshot of the tab instead, when they are on screen.
+ */
+async function readCanvasPixels(roots) {
+  const out = new Map();
+  const canvases = [];
+  for (const root of roots) {
+    if (root.tagName === 'CANVAS') canvases.push(root);
+    root.querySelectorAll('canvas').forEach((c) => canvases.push(c));
+  }
+  const unreadable = [];
+  for (const canvas of canvases) {
+    let url = null;
+    try { url = canvas.toDataURL('image/png'); } catch (e) { url = null; }
+    // A transparent read is real for an empty 2d canvas, a failure for WebGL.
+    if (url && canvasIsBlank(canvas) && !ownsCanvas2d(canvas)) url = null;
+    if (url) out.set(canvas, url); else unreadable.push(canvas);
+  }
+  if (_exportDiag) _exportDiag.canvases = { read: out.size, fromScreen: 0, unreadable: unreadable.length };
+
+  const onScreen = unreadable.filter((c) => {
+    const r = c.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+  });
+  if (!onScreen.length) return out;
+  const shot = await new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'CAPTURE_TAB' }, (reply) => {
+        const failed = chrome.runtime.lastError ? chrome.runtime.lastError.message : (!reply || !reply.ok) && ((reply && reply.error) || 'no reply');
+        if (failed && _exportDiag) _exportDiag.canvases.screenshotError = failed;
+        resolve(failed ? null : reply.dataUrl);
+      });
+    } catch (e) { resolve(null); }
+  });
+  if (!shot) return out;
+  const img = new Image();
+  img.src = shot;
+  try { await img.decode(); } catch (e) { return out; }
+  const scale = img.naturalWidth / innerWidth;
+  for (const canvas of onScreen) {
+    const r = canvas.getBoundingClientRect();
+    const crop = document.createElement('canvas');
+    crop.width = Math.max(1, Math.round(r.width * scale));
+    crop.height = Math.max(1, Math.round(r.height * scale));
+    crop.getContext('2d').drawImage(img, r.left * scale, r.top * scale, r.width * scale, r.height * scale,
+      0, 0, crop.width, crop.height);
+    out.set(canvas, crop.toDataURL('image/png'));
+    _exportDiag.canvases.fromScreen++;
+    _exportDiag.canvases.unreadable--;
+  }
+  return out;
+}
+
+/** Every sampled pixel fully transparent? Sampled small, so the cost is constant. */
+function canvasIsBlank(canvas) {
+  try {
+    const probe = document.createElement('canvas');
+    probe.width = probe.height = 24;
+    const ctx = probe.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(canvas, 0, 0, 24, 24);
+    const data = ctx.getImageData(0, 0, 24, 24).data;
+    for (let i = 3; i < data.length; i += 4) if (data[i] !== 0) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** Contexts are exclusive: null here means WebGL / WebGPU owns the canvas. */
+function ownsCanvas2d(canvas) {
+  try { return !!canvas.getContext('2d'); } catch (e) { return false; }
+}
+
+async function buildExportNow() {
   console.log('[Pluck] buildExport called, selectedElements.size:', selectedElements.size);
   selectedElements.forEach((el, idx) => {
     console.log('[Pluck] Selected element', idx, ':', el.tagName, el);
@@ -3936,7 +4038,9 @@ async function buildExport() {
   if (!selectedElements.size) return null;
 
   // Signal the dock to show its loader now (covers every trigger); it hides on result.
-  try { chrome.runtime.sendMessage({ type: 'EXPORT_STARTED' }, () => void chrome.runtime.lastError); } catch (e) {}
+  if (!_agentExporting) {
+    try { chrome.runtime.sendMessage({ type: 'EXPORT_STARTED' }, () => void chrome.runtime.lastError); } catch (e) {}
+  }
 
   resetStyleRegistry();
   cloneToOriginal = new Map();
@@ -3955,6 +4059,7 @@ async function buildExport() {
 
   const topLevel = getTopLevelSelections();
   _exportDiag.selectionCount = topLevel.length;
+  _canvasPixels = await readCanvasPixels(topLevel);
 
   // Group selections by layout parent so siblings keep their flex/grid context.
   const groups = new Map();
@@ -4053,6 +4158,10 @@ async function buildExport() {
 
   const structure = structures.length === 1 ? structures[0] : structures;
 
+  // Text as one quoted TOON token: quotes, backslashes and line breaks escaped
+  const toonQuote = (text) =>
+    '"' + String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n') + '"';
+
   // Build TOON (Token-Optimized Object Notation) - more efficient for LLMs
   // Format: Minimal syntax, abbreviated keys, no redundant quotes
   function structureToToon(node, indent = 0) {
@@ -4068,7 +4177,7 @@ async function buildExport() {
     // Attributes on same line
     const attrs = [];
     if (node.href) attrs.push(`href="${node.href}"`);
-    if (node.src) attrs.push(`src="${node.src}"`);
+    if (node.src) attrs.push(`src="${/^data:/.test(node.src) ? node.src.slice(0, node.src.indexOf(',') + 1) + '…(' + node.src.length + ' bytes)' : node.src}"`);
     if (node.alt) attrs.push(`alt="${node.alt}"`);
     if (node.type) attrs.push(`type="${node.type}"`);
     if (node.placeholder) attrs.push(`placeholder="${node.placeholder}"`);
@@ -4077,8 +4186,13 @@ async function buildExport() {
     if (node.isIcon) attrs.push(`icon`);
     if (attrs.length) toon += ` (${attrs.join(' ')})`;
 
-    // Text content
-    if (node.text) toon += ` "${node.text}"`;
+    // Children, with the text between them in order ("Create" beside a ▾ icon),
+    // as the HTML output keeps it
+    const ordered = node.orderedContent || [];
+    const mixed = ordered.some(c => c.type === 'element');
+
+    // Text content (for mixed content it is written between the children instead)
+    if (node.text && !mixed) toon += ` ${toonQuote(node.text)}`;
 
     // SVG (inline)
     if (node.svg) {
@@ -4086,7 +4200,14 @@ async function buildExport() {
     }
 
     // Children
-    if (node.children && node.children.length > 0) {
+    if (mixed) {
+      toon += ' {\n';
+      for (const item of ordered) {
+        if (item.type === 'element') toon += structureToToon(item.node, indent + 1) + '\n';
+        else if (item.content.trim()) toon += `${pad}  ${toonQuote(item.content.trim())}\n`;
+      }
+      toon += `${pad}}`;
+    } else if (node.children && node.children.length > 0) {
       toon += ' {\n';
       for (const child of node.children) {
         toon += structureToToon(child, indent + 1) + '\n';
@@ -4786,4 +4907,347 @@ try {
     out.sort((a, b) => (b.w * b.h) - (a.w * a.h));
     return out.slice(0, max);
   };
+})();
+
+// ===== Agent bridge =====
+// Lets a coding agent that can run JavaScript in the page (Claude in Chrome,
+// Playwright, a devtools console) drive a capture. Content scripts run in an
+// isolated world, so the agent cannot call anything here directly; the page's
+// message channel and DOM are what the two share:
+//
+//   window.postMessage({ __pluckAgent: 'capture', id, name,
+//     selector | selectors:[…] | point:{x,y} | hovered:true | fullPage:true,
+//     exact, combine, preview, previewMs, expect, formats }, '*')
+//
+// The reply is written to <html data-pluck-result> (an attribute stays until
+// the agent comes back to read it) and also posted as { __pluckAgent: 'result' }.
+// - selectors: several elements in one capture, like Shift+Click; combine:
+//   'ancestor' captures their nearest common parent instead.
+// - preview: outline the target and report what is inside, without saving.
+// - expect: { text: [...] } labels the capture must contain; `missing` lists
+//   the ones it does not (case-insensitive).
+// - fingerprint / sameAsLast: catch a capture identical to the previous one.
+// Files are saved by the worker to Downloads/pluck/<site>/<name>.toon|.html,
+// only on sites allowed by the dock's Agent captures switch (local hosts by default).
+(function () {
+  if (window.top !== window) return;
+  const KEY = '__pluckAgent';
+  const RESULT_ATTR = 'data-pluck-result';
+  const PREVIEW_ID = '__pluck_agent_preview';
+  const LIST_LIMIT = 30;
+  const HOVER_MS = 500;
+  let busy = false;
+  let lastFingerprint = null;
+  let previewTimer = null;
+
+  const norm = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+
+  function ask(message) {
+    return new Promise((resolve) => {
+      // A reloaded extension leaves this script running with chrome.runtime gone.
+      if (!chrome.runtime || !chrome.runtime.id) {
+        resolve({ ok: false, reason: 'Extension context invalidated. Reload this page.' });
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage(message, (reply) => {
+          if (chrome.runtime.lastError) resolve({ ok: false, reason: chrome.runtime.lastError.message });
+          else resolve(reply || { ok: false, reason: 'no reply from the extension' });
+        });
+      } catch (e) {
+        // Thrown when the extension was reloaded after this page loaded.
+        resolve({ ok: false, reason: String((e && e.message) || e) + ' Reload this page.' });
+      }
+    });
+  }
+
+  function describe(el) {
+    const r = el.getBoundingClientRect();
+    const cls = typeof el.className === 'string'
+      ? el.className.split(/\s+/).filter((c) => c && !c.startsWith('web-replica-')).slice(0, 4).join('.') : '';
+    return { tag: el.tagName.toLowerCase(), id: el.id || null, classes: cls || null,
+      width: Math.round(r.width), height: Math.round(r.height), text: norm(el.innerText).slice(0, 80) };
+  }
+
+  /**
+   * `hover`: where the real pointer goes before capturing, as a selector (its
+   * centre, scrolled into view first) or viewport {x, y}.
+   */
+  function hoverPoint(hover) {
+    if (hover && typeof hover === 'object' && isFinite(hover.x) && isFinite(hover.y)) {
+      return { x: Number(hover.x), y: Number(hover.y) };
+    }
+    if (typeof hover !== 'string' || !hover) return { error: 'hover must be a selector or {x, y}' };
+    const hit = query(hover);
+    if (hit.invalid) return { error: 'invalid selector: ' + hover };
+    if (!hit.el) return { error: 'no element matches: ' + hover, missing: [hover] };
+    let rect = hit.el.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) {
+      hit.el.scrollIntoView({ block: 'center', inline: 'center' });
+      rect = hit.el.getBoundingClientRect();
+    }
+    if (!rect.width && !rect.height) return { error: 'hover target is not shown: ' + hover };
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }
+
+  function query(selector) {
+    try { return { el: document.querySelector(selector) }; } catch (e) { return { invalid: true }; }
+  }
+
+  function commonAncestor(a, b) {
+    const seen = new Set();
+    for (let n = a; n; n = n.parentElement) seen.add(n);
+    for (let n = b; n; n = n.parentElement) if (seen.has(n)) return n;
+    return null;
+  }
+
+  function resolveTargets(req) {
+    if (req.fullPage) return { elements: [document.body], exact: true };
+    if (Array.isArray(req.selectors)) {
+      const list = req.selectors.filter((s) => typeof s === 'string' && s);
+      if (!list.length) return { error: 'selectors is empty' };
+      const found = [];
+      const missing = [];
+      for (const sel of list) {
+        const hit = query(sel);
+        if (hit.invalid) return { error: 'invalid selector: ' + sel };
+        if (hit.el) found.push(hit.el); else missing.push(sel);
+      }
+      if (missing.length) return { error: 'no element matches: ' + missing.join(', '), missing };
+      if (req.combine === 'ancestor') {
+        let common = found[0];
+        for (const el of found.slice(1)) common = commonAncestor(common, el);
+        return { elements: [common && common !== document.documentElement ? common : document.body], exact: true };
+      }
+      return { elements: found, exact: req.exact !== false };   // Shift+Click takes each as-is
+    }
+    let el = null;
+    if (typeof req.selector === 'string' && req.selector) {
+      const hit = query(req.selector);
+      if (hit.invalid) return { error: 'invalid selector: ' + req.selector };
+      el = hit.el;
+    } else if (req.point && isFinite(req.point.x) && isFinite(req.point.y)) {
+      el = document.elementFromPoint(Number(req.point.x), Number(req.point.y));
+    } else if (req.hovered) {
+      const chain = document.querySelectorAll(':hover');
+      el = chain.length ? chain[chain.length - 1] : null;
+    }
+    if (!el || el.nodeType !== 1) return { error: 'target not found' };
+    return { elements: [el], exact: !!req.exact };
+  }
+
+  function choose(resolved) {
+    const expanded = resolved.elements.map((el) => (resolved.exact ? el : expandToMeaningfulContainer(el)) || el);
+    return expanded.filter((el, i) => expanded.indexOf(el) === i &&
+      !expanded.some((o) => o !== el && o.contains(el)));
+  }
+
+  function shown(el) {
+    if (typeof el.checkVisibility === 'function') return el.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true });
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  }
+
+  const HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"],legend,caption';
+  const CONTROLS = 'button,a[href],input:not([type="hidden"]),select,textarea,[role="button"],[role="link"],' +
+    '[role="combobox"],[role="checkbox"],[role="radio"],[role="tab"],[role="menuitem"],[role="option"],[role="switch"],[role="textbox"]';
+
+  function summarize(elements) {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const out = { boxes: [], hidden: false, partlyOffscreen: false, children: 0, descendants: 0,
+      headings: [], controls: [], controlCount: 0 };
+    for (const el of elements) {
+      const r = el.getBoundingClientRect();
+      out.boxes.push({ x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) });
+      if (r.left < 0 || r.top < 0 || r.right > vw || r.bottom > vh) out.partlyOffscreen = true;
+      if (!shown(el) || !r.width || !r.height) out.hidden = true;
+      out.children += el.children.length;
+      out.descendants += el.getElementsByTagName('*').length;
+      for (const h of el.querySelectorAll(HEADINGS)) {
+        if (out.headings.length >= LIST_LIMIT) break;
+        const t = norm(h.innerText).slice(0, 80);
+        if (t && shown(h)) out.headings.push(t);
+      }
+      for (const c of el.querySelectorAll(CONTROLS)) {
+        if (!shown(c)) continue;
+        out.controlCount += 1;
+        if (out.controls.length >= LIST_LIMIT) continue;
+        const tag = c.tagName.toLowerCase();
+        const kind = c.getAttribute('role') || (tag === 'input' ? 'input:' + (c.getAttribute('type') || 'text') : tag);
+        const label = c.getAttribute('aria-label') || c.innerText || (c.labels && c.labels[0] && c.labels[0].innerText) ||
+          c.getAttribute('placeholder') || c.getAttribute('title') || c.value || c.getAttribute('name');
+        out.controls.push({ kind, label: norm(label).slice(0, 60) });
+      }
+    }
+    out.text = norm(elements.map((el) => el.innerText).join(' ')).slice(0, 200);
+    return out;
+  }
+
+  function clearPreview() {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+    const layer = document.getElementById(PREVIEW_ID);
+    if (layer) layer.remove();
+  }
+
+  function showPreview(elements, ms) {
+    clearPreview();
+    const layer = document.createElement('div');
+    layer.id = PREVIEW_ID;
+    layer.setAttribute('aria-hidden', 'true');
+    layer.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647';
+    elements.forEach((el, i) => {
+      const r = el.getBoundingClientRect();
+      const box = document.createElement('div');
+      box.style.cssText = 'position:fixed;box-sizing:border-box;border:2px dashed #93a8ff;background:rgba(147,168,255,.10);' +
+        'left:' + r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px';
+      const tag = document.createElement('div');
+      tag.textContent = (elements.length > 1 ? (i + 1) + ' · ' : '') + el.tagName.toLowerCase() + ' ' +
+        Math.round(r.width) + '×' + Math.round(r.height);
+      tag.style.cssText = 'position:absolute;left:-2px;top:-20px;padding:2px 6px;font:11px/14px ui-monospace,Menlo,monospace;' +
+        'color:#161618;background:#93a8ff;white-space:nowrap';
+      box.appendChild(tag);
+      layer.appendChild(box);
+    });
+    (document.body || document.documentElement).appendChild(layer);
+    previewTimer = setTimeout(clearPreview, ms);
+  }
+
+  function fingerprint(text) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return ('0000000' + hash.toString(16)).slice(-8);
+  }
+
+  // Compared without whitespace, so a label split across elements ("Create" +
+  // "Order") matches the same way in the page text and in the TOON.
+  const squash = (v) => String(v == null ? '' : v).replace(/\s+/g, '').toLowerCase();
+
+  function missingText(expect, haystack) {
+    const wanted = Array.isArray(expect) ? expect : (expect && Array.isArray(expect.text) ? expect.text : []);
+    const text = squash(haystack);
+    return wanted.filter((t) => typeof t === 'string' && squash(t) && text.indexOf(squash(t)) === -1);
+  }
+
+  /** The text tokens of a TOON's Structure section (not styles or attribute values). */
+  function toonText(toon) {
+    const at = toon.indexOf('\n## Structure');
+    const body = at === -1 ? toon : toon.slice(at);
+    // Attribute values (`href="…"`) are matched whole and skipped.
+    const re = /="(?:[^"\\\n]|\\.)*"|"((?:[^"\\\n]|\\.)*)"/g;
+    const out = [];
+    let m;
+    while ((m = re.exec(body))) {
+      if (m[1] !== undefined) out.push(m[1].replace(/\\(.)/g, (x, c) => (c === 'n' ? ' ' : c)));
+    }
+    return out.join(' ');
+  }
+
+  function brief(d) {
+    if (!d) return null;
+    return { selections: d.selectionCount, filtered: d.filteredCount, styles: d.styleCount,
+      hoverStyles: d.hoverStyleCount, primaryFont: d.primaryFont || null, primaryFontWillLoad: !!d.primaryFontWillLoad,
+      canvases: d.canvases || null };
+  }
+
+  /** Runs buildExport on the given elements, then puts the user's own selection back. */
+  function exportElements(elements) {
+    // Under the export lock, so a dock export waits instead of exporting the
+    // agent's elements or sharing its style registries.
+    return exclusiveExport(async () => {
+      const previous = Array.from(selectedElements);
+      previous.forEach((el) => toggleElement(el, false));
+      _agentExporting = true;
+      try {
+        elements.forEach((el) => toggleElement(el, true));
+        return await buildExportNow();
+      } finally {
+        _agentExporting = false;
+        Array.from(selectedElements).forEach((el) => toggleElement(el, false));
+        previous.forEach((el) => { if (el.isConnected) toggleElement(el, true); });
+      }
+    });
+  }
+
+  async function run(req) {
+    const id = String(req.id || Date.now());
+    const report = (result) => {
+      const out = Object.assign({}, result, { id });
+      try { document.documentElement.setAttribute(RESULT_ATTR, JSON.stringify(out)); } catch (e) { /* noop */ }
+      window.postMessage(Object.assign({ [KEY]: 'result' }, out), '*');
+    };
+
+    // Checked before anything is written: a site that is not allowed gets no
+    // reply at all, so it cannot tell that Pluck is installed.
+    const gate = await ask({ type: 'PLUCK_AGENT_ALLOWED' });
+    if (!gate.ok) {
+      if (!gate.refused) report({ status: 'error', reason: gate.reason });
+      return;
+    }
+    if (busy) { report({ status: 'error', reason: 'a capture is already running' }); return; }
+    const unknown = (Array.isArray(req.formats) ? req.formats : []).filter((f) => f !== 'toon' && f !== 'html');
+    if (unknown.length) { report({ status: 'error', reason: 'unknown format: ' + unknown.join(', ') }); return; }
+    busy = true;
+    report({ status: 'pending' });
+    clearPreview();
+    try {
+      if (req.hover != null) {
+        const point = hoverPoint(req.hover);
+        if (point.error) {
+          report(Object.assign({ status: 'error', reason: point.error }, point.missing ? { missing: point.missing } : {}));
+          return;
+        }
+        const moved = await ask({ type: 'PLUCK_AGENT_HOVER', x: point.x, y: point.y });
+        if (!moved.ok) { report({ status: 'error', reason: moved.reason || 'could not move the pointer' }); return; }
+        // Long enough for a hover menu or tooltip to open.
+        const wait = Math.min(10000, Math.max(0, Number(req.hoverMs) >= 0 ? Number(req.hoverMs) : HOVER_MS));
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+
+      const resolved = resolveTargets(req);
+      if (resolved.error) {
+        report(Object.assign({ status: 'error', reason: resolved.error }, resolved.missing ? { missing: resolved.missing } : {}));
+        return;
+      }
+      const chosen = choose(resolved);
+      const targets = chosen.map(describe);
+
+      if (req.preview) {
+        const ms = Math.min(30000, Math.max(500, Number(req.previewMs) || 4000));
+        const summary = summarize(chosen);
+        showPreview(chosen, ms);
+        report({ status: 'preview', target: targets[0], targets, summary, highlightMs: ms,
+          missing: missingText(req.expect, chosen.map((el) => el.innerText).join(' ')) });
+        return;
+      }
+
+      const result = await exportElements(chosen);
+      if (!result || !result.toon) { report({ status: 'error', reason: 'export produced no output', targets }); return; }
+
+      const print = fingerprint(result.toon);
+      const sameAsLast = print === lastFingerprint;
+      const missing = missingText(req.expect, toonText(result.toon));
+      const saved = await ask({ type: 'PLUCK_AGENT_SAVE', name: req.name, toon: result.toon, html: result.html,
+        formats: Array.isArray(req.formats) ? req.formats : null,
+        redactParams: Array.isArray(req.redactParams) ? req.redactParams : null });
+      if (!saved.ok) { report({ status: 'error', reason: saved.reason, target: targets[0], targets }); return; }
+      lastFingerprint = print;
+      report({ status: 'done', target: targets[0], targets, paths: saved.paths, bytes: saved.bytes,
+        fingerprint: print, sameAsLast, missing, diagnostics: brief(result.diagnostics) });
+    } catch (e) {
+      report({ status: 'error', reason: String((e && e.message) || e) });
+    } finally {
+      busy = false;
+    }
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object' || data[KEY] !== 'capture') return;
+    run(data);
+  }, false);
 })();

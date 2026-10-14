@@ -25,6 +25,11 @@
 
   <!-- Control bar -->
   <div class="controls" id="controls">
+    <div class="agent-row" title="Lets a coding agent running JavaScript in this page trigger captures (saved to Downloads/pluck/&lt;site&gt;/). Local development hosts are always on.">
+      <span class="material-symbols-outlined" aria-hidden="true">smart_toy</span>
+      <span class="agent-label" id="agent-label">Agent captures · <span id="agent-site-label">this site</span></span>
+      <button class="btn agent-toggle" id="btn-agent-site" aria-pressed="false" aria-labelledby="agent-label btn-agent-site">Off</button>
+    </div>
     <button class="btn btn-primary btn-block" id="btn-select">
       <span class="material-symbols-outlined">point_scan</span>
       <span id="select-label">Start Selecting</span>

@@ -751,6 +751,42 @@ function wire() {
   });
 }
 
+// ================= Agent captures =================
+// Shows and flips whether the active tab's site may drive captures through the
+// agent bridge (see the end of contentScript.js). Only this extension page can
+// change the list; the worker refuses the same request from a page.
+function renderAgentSwitch() {
+  getActiveTab((tab) => {
+    const button = $('btn-agent-site');
+    let origin = '';
+    try { origin = new URL(tab && tab.url).origin; } catch (e) { /* not a web page */ }
+    if (!/^https?:/.test(origin)) {
+      $('agent-site-label').textContent = 'this page';
+      button.textContent = 'Not available';
+      button.disabled = true;
+      return;
+    }
+    $('agent-site-label').textContent = new URL(origin).host;
+    chrome.runtime.sendMessage({ type: 'PLUCK_AGENT_CONFIG', origin }, (config) => {
+      if (chrome.runtime.lastError || !config || !config.ok || !config.enabled) {
+        button.textContent = 'Disabled';
+        button.disabled = true;
+        return;
+      }
+      button.textContent = config.allowed ? (config.byPattern ? 'On (local host)' : 'On') : 'Off';
+      button.setAttribute('aria-pressed', config.allowed ? 'true' : 'false');
+      button.classList.toggle('on', !!config.allowed);
+      button.disabled = !!config.byPattern;
+      button.onclick = () => {
+        chrome.runtime.sendMessage({ type: 'PLUCK_AGENT_SET_ORIGIN', origin, allow: !config.allowed }, () => {
+          void chrome.runtime.lastError;
+          renderAgentSwitch();
+        });
+      };
+    });
+  });
+}
+
 // ================= Init =================
 function init() {
   loadSettings(() => {
@@ -789,7 +825,14 @@ function init() {
     }
   });
 
-  if (!isPopout) { queryCurrentState(); startPolling(); }
+  if (!isPopout) {
+    queryCurrentState();
+    startPolling();
+    // The agent switch above Start Selecting follows the active tab's site.
+    renderAgentSwitch();
+    chrome.tabs.onActivated.addListener(renderAgentSwitch);
+    chrome.tabs.onUpdated.addListener((tabId, change, tab) => { if (change.url && tab.active) renderAgentSwitch(); });
+  }
 }
 
 init();
